@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require('uuid'); // 使用 uuid 库生成唯一ID
 const PORT = process.env.PORT || 8088;
 const wss = new WebSocket.Server({ port: PORT });
 
-const clients = new Map(); // 存储所有客户端信息 { id, role, ws }
+const clients = new Map(); // 存储所有客户端信息 { id, role, username, ws }
 let broadcasterId = null;
 
 console.log(`✅ Signaling server started on ws://localhost:${PORT}`);
@@ -13,7 +13,7 @@ console.log(`✅ Signaling server started on ws://localhost:${PORT}`);
 wss.on('connection', ws => {
     const clientId = uuidv4();
     console.log(`ℹ️ Client connected, assigned ID: ${clientId}`);
-    clients.set(clientId, { id: clientId, role: null, ws: ws });
+    clients.set(clientId, { id: clientId, role: null, username: null, ws: ws });
 
     ws.on('message', messageString => {
         let message;
@@ -28,7 +28,7 @@ wss.on('connection', ws => {
 
         switch (message.type) {
             case 'register':
-                handleRegistration(clientId, message.payload.role);
+                handleRegistration(clientId, message.payload);
                 break;
             
             case 'offer':
@@ -71,12 +71,14 @@ wss.on('connection', ws => {
     });
 });
 
-function handleRegistration(clientId, role) {
+function handleRegistration(clientId, payload) {
+    const { role, username } = payload;
     const clientInfo = clients.get(clientId);
     if (!clientInfo) return;
 
     clientInfo.role = role;
-    console.log(`✍️  Registered client ${clientId} as a ${role}`);
+    clientInfo.username = username || `User-${clientId.substring(0, 4)}`;
+    console.log(`✍️  Registered client ${clientId} as a ${role} with username ${clientInfo.username}`);
 
     if (role === 'broadcaster') {
         if (broadcasterId) {
@@ -88,8 +90,14 @@ function handleRegistration(clientId, role) {
             const broadcasterClient = clients.get(broadcasterId);
             if (broadcasterClient) {
                 console.log(`🔔 Notifying broadcaster (${broadcasterId}) of new viewer (${clientId})`);
-                // Notify the broadcaster about the new viewer
-                broadcasterClient.ws.send(JSON.stringify({ type: 'new-viewer', payload: { viewerId: clientId } }));
+                // Notify the broadcaster about the new viewer, including their username
+                broadcasterClient.ws.send(JSON.stringify({ 
+                    type: 'new-viewer', 
+                    payload: { 
+                        viewerId: clientId,
+                        username: clientInfo.username 
+                    } 
+                }));
             }
         } else {
             console.log('ℹ️ A viewer connected, but no broadcaster is available yet.');
