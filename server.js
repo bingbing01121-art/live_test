@@ -36,6 +36,10 @@ wss.on('connection', ws => {
             case 'candidate':
                 routeMessage(clientId, message);
                 break;
+
+            case 'kick-user':
+                handleKickUser(clientId, message.payload);
+                break;
             
             default:
                 console.warn(`⚠️ Unhandled message type: ${message.type}`);
@@ -70,6 +74,26 @@ wss.on('connection', ws => {
         console.error(`❌ Server error for client ${clientId}:`, error);
     });
 });
+
+function handleKickUser(senderId, payload) {
+    if (senderId !== broadcasterId) {
+        console.warn(`⚠️ Non-broadcaster client ${senderId} attempted to kick a user. Action denied.`);
+        return;
+    }
+
+    const { targetId } = payload;
+    const targetClient = clients.get(targetId);
+
+    if (targetClient) {
+        console.log(`👢 Kicking user ${targetId} by broadcaster's request.`);
+        // Optionally send a message to the user before kicking
+        targetClient.ws.send(JSON.stringify({ type: 'kicked', payload: { reason: '您已被主播移出直播间' } }));
+        // Close the connection
+        targetClient.ws.close();
+    } else {
+        console.warn(`⚠️ Broadcaster tried to kick non-existent user ${targetId}.`);
+    }
+}
 
 function handleRegistration(clientId, payload) {
     const { role, username } = payload;
