@@ -1,37 +1,119 @@
-// 要运行此文件，需要先在终端中执行 `npm install ws` 来安装 WebSocket 库
 const WebSocket = require('ws');
+const { v4: uuidv4 } = require('uuid'); // 使用 uuid 库生成唯一ID
 
-// 创建一个 WebSocket 服务器，监听 8080 端口
+// To run this, you need to install ws and uuid: npm install ws uuid
 const PORT = process.env.PORT || 8088;
 const wss = new WebSocket.Server({ port: PORT });
-console.log(`✅ 信令服务器已启动在 ws://localhost:${PORT}`);
 
-// 监听客户端连接事件
+const clients = new Map(); // 存储所有客户端信息 { id, role, ws }
+let broadcasterId = null;
+
+console.log(`✅ Signaling server started on ws://localhost:${PORT}`);
+
 wss.on('connection', ws => {
-    console.log('ℹ️ 一个客户端已连接');
+    const clientId = uuidv4();
+    console.log(`ℹ️ Client connected, assigned ID: ${clientId}`);
+    clients.set(clientId, { id: clientId, role: null, ws: ws });
 
-    // 监听客户端发送的消息事件
-    ws.on('message', message => {
-        // 将接收到的消息（通常是 Buffer）转换为字符串以便处理和广播
-        const messageString = message.toString();
-        // console.log(`↪️  收到消息，内容（部分）：${messageString.substring(0, 100)}...`); // 打印部分消息内容，避免过长
-        console.log('✈️  正在广播消息给其他客户端...');
+    ws.on('message', messageString => {
+        let message;
+        try {
+            message = JSON.parse(messageString);
+        } catch (e) {
+            console.error('❌ Failed to parse message:', messageString);
+            return;
+        }
 
-        // 将消息广播给除发送者之外的所有其他连接的客户端
-        wss.clients.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                client.send(messageString);
-            }
-        });
+        console.log(`↪️ Received message type: ${message.type} from ${clientId}`);
+
+        switch (message.type) {
+            case 'register':
+                handleRegistration(clientId, message.payload.role);
+                break;
+            
+            case 'offer':
+            case 'answer':
+            case 'candidate':
+                routeMessage(clientId, message);
+                break;
+            
+            default:
+                console.warn(`⚠️ Unhandled message type: ${message.type}`);
+        }
     });
 
-    // 监听客户端断开连接事件
     ws.on('close', () => {
-        console.log('ℹ️ 一个客户端已断开');
+        console.log(`ℹ️ Client disconnected: ${clientId}`);
+        const clientInfo = clients.get(clientId);
+        if (clientInfo) {
+            // If the broadcaster disconnects, notify all viewers
+            if (clientInfo.role === 'broadcaster') {
+                console.log('📣 Broadcaster has disconnected. Notifying viewers...');
+                broadcasterId = null;
+                clients.forEach(c => {
+                    if (c.role === 'viewer') {
+                        c.ws.send(JSON.stringify({ type: 'broadcaster-disconnected' }));
+                    }
+                });
+            } else if (clientInfo.role === 'viewer' && broadcasterId) {
+                // If a viewer disconnects, notify the broadcaster
+                const broadcasterClient = clients.get(broadcasterId);
+                if (broadcasterClient) {
+                    broadcasterClient.ws.send(JSON.stringify({ type: 'viewer-disconnected', payload: { viewerId: clientId } }));
+                }
+            }
+        }
+        clients.delete(clientId);
     });
 
-    // 监听错误事件
     ws.on('error', (error) => {
-        console.error(`❌ 信令服务器发生错误: ${error}`);
+        console.error(`❌ Server error for client ${clientId}:`, error);
     });
 });
+
+function handleRegistration(clientId, role) {
+    const clientInfo = clients.get(clientId);
+    if (!clientInfo) return;
+
+    clientInfo.role = role;
+    console.log(`✍️  Registered client ${clientId} as a ${role}`);
+
+    if (role === 'broadcaster') {
+        if (broadcasterId) {
+            console.warn(`⚠️ A broadcaster is already registered. Overwriting with new broadcaster ${clientId}`);
+        }
+        broadcasterId = clientId;
+    } else if (role === 'viewer') {
+        if (broadcasterId) {
+            const broadcasterClient = clients.get(broadcasterId);
+            if (broadcasterClient) {
+                console.log(`🔔 Notifying broadcaster (${broadcasterId}) of new viewer (${clientId})`);
+                // Notify the broadcaster about the new viewer
+                broadcasterClient.ws.send(JSON.stringify({ type: 'new-viewer', payload: { viewerId: clientId } }));
+            }
+        } else {
+            console.log('ℹ️ A viewer connected, but no broadcaster is available yet.');
+        }
+    }
+}
+
+function routeMessage(senderId, message) {
+    const targetId = message.payload.targetId;
+    if (!targetId) {
+        console.error('❌ Routing error: message is missing targetId', message);
+        return;
+    }
+    
+    const targetClient = clients.get(targetId);
+    if (targetClient) {
+        console.log(`✈️  Routing message from ${senderId} to ${targetId}`);
+        // Add senderId to the payload so the recipient knows who sent it
+        const outboundPayload = { ...message.payload, senderId };
+        targetClient.ws.send(JSON.stringify({
+            type: message.type,
+            payload: outboundPayload
+        }));
+    } else {
+        console.warn(`⚠️ Could not find target client with ID: ${targetId}`);
+    }
+}

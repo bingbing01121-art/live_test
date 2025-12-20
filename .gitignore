@@ -1,0 +1,10 @@
+# IDE and editor files
+.idea/
+*.iml
+
+# Node dependencies
+node_modules/
+
+# Build and log files
+npm-debug.log
+*.log

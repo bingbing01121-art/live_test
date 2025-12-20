@@ -50,7 +50,7 @@
             logs.scrollTop = logs.scrollHeight;
         }
 
-        const ws = new WebSocket('ws://192.168.17.199:8088');
+        const ws = new WebSocket('wss://live-test-a52n.onrender.com');
         let localStream;
         let peerConnection;
         let dataChannel; // 新增：用于数据传输（聊天、礼物等）

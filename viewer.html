@@ -26,7 +26,7 @@
             logs.scrollTop = logs.scrollHeight;
         }
 
-        const ws = new WebSocket('ws://192.168.17.199:8088');
+        const ws = new WebSocket('wss://live-test-a52n.onrender.com');
         let peerConnection; // 保存 WebRTC PeerConnection 对象
 
         // --- WebSocket 事件处理 ---
@@ -74,8 +74,16 @@
                 // 监听主播发来的媒体流 (video/audio tracks)
                 peerConnection.ontrack = event => {
                     log('▶️ live.play → 收到远程媒体流，开始播放直播。');
-                    if (remoteVideo.srcObject !== event.streams[0]) {
-                        remoteVideo.srcObject = event.streams[0];
+                    log(`ontrack event: ${JSON.stringify(event.streams.map(s => s.id))}, tracks: ${JSON.stringify(event.track.id)}`);
+                    if (event.streams && event.streams[0]) {
+                        if (remoteVideo.srcObject !== event.streams[0]) {
+                            remoteVideo.srcObject = event.streams[0];
+                            log('✅ remoteVideo.srcObject 已设置。');
+                        } else {
+                            log('ℹ️ remoteVideo.srcObject 已经设置，无需重复。');
+                        }
+                    } else {
+                        log('❌ ontrack 事件中没有找到媒体流。');
                     }
                 };
 
