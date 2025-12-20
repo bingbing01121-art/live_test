@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>主播端 (Broadcaster)</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
+        h1 { color: #1a73e8; }
+        video { border: 2px solid #ccc; border-radius: 8px; width: 520px; height: 390px; background: #000; display: block; margin-bottom: 15px;}
+        .controls button, .controls input { margin: 5px; padding: 10px 15px; border-radius: 5px; border: none; cursor: pointer; font-size: 14px; }
+        .controls button { background-color: #1a73e8; color: white; }
+        .controls button:hover { background-color: #155ab6; }
+        .controls input { border: 1px solid #ccc; padding: 9px; }
+        #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 300px; overflow-y: auto; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>主播端 (Broadcaster)</h1>
+    <video id="localVideo" autoplay muted playsinline></video>
+    <div class="controls">
+        <button id="startButton">开始直播 (live.start)</button>
+        <button id="stopButton">结束直播 (live.stop)</button>
+        <hr>
+        <button id="muteButton">静音 (live.anchor.mute)</button>
+        <button id="unmuteButton">取消静音 (live.anchor.unmute)</button>
+        <br>
+        <button id="likeButton">点赞 (live.like)</button>
+        <button id="giftButton">送礼物 (live.gift.send)</button>
+        <br>
+        <input type="text" id="chatInput" placeholder="输入弹幕...">
+        <button id="sendChatButton">发送弹幕 (live.chat.message)</button>
+    </div>
+    <h3>事件日志:</h3>
+    <div id="logs"></div>
+
+    <script>
+        const localVideo = document.getElementById('localVideo');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const muteButton = document.getElementById('muteButton');
+        const unmuteButton = document.getElementById('unmuteButton');
+        const likeButton = document.getElementById('likeButton');
+        const giftButton = document.getElementById('giftButton');
+        const chatInput = document.getElementById('chatInput');
+        const sendChatButton = document.getElementById('sendChatButton');
+        const logs = document.getElementById('logs');
+
+        function log(message) {
+            console.log(message);
+            logs.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}\n`;
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        const ws = new WebSocket('ws://192.168.17.199:8088');
+        let localStream;
+        let peerConnection;
+        let dataChannel; // 新增：用于数据传输（聊天、礼物等）
+
+        // --- WebSocket 事件处理 ---
+        ws.onopen = () => log('📡 已成功连接到信令服务器。');
+        ws.onerror = (error) => log(`❌ WebSocket 连接错误: ${error.message || '未知错误'}。请确认信令服务器是否已启动。`);
+        ws.onmessage = async event => {
+            const message = JSON.parse(event.data);
+            log(`📩 收到信令消息: ${message.type}`);
+            if (message.type === 'answer' && peerConnection) {
+                log('🤝 收到观众的 Answer，正在设置远端描述...');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+            } else if (message.type === 'candidate' && peerConnection) {
+                 log('📍 收到观众的 ICE Candidate，正在添加...');
+                 try {
+                     await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                 } catch (e) {
+                     log(`⚠️ 添加 ICE Candidate 失败: ${e.toString()}`);
+                 }
+            }
+        };
+
+        // --- 媒体设备初始化 ---
+        async function initMedia() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                log('✅ live.ready → 直播初始化完成，摄像头和麦克风已就绪。');
+            } catch (e) {
+                log(`❌ 获取媒体设备失败: ${e.toString()}。请检查浏览器权限设置。`);
+                alert('无法访问摄像头或麦克风，请检查浏览器权限设置。');
+            }
+        }
+
+        // --- 数据通道消息发送辅助函数 ---
+        function sendDataChannelMessage(type, payload) {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                const message = JSON.stringify({ type, payload });
+                dataChannel.send(message);
+                log(`📤 (通过数据通道发送) ${type}: ${JSON.stringify(payload) || '无内容'}`);
+            } else {
+                log('❌ 数据通道未开启或未创建，无法发送消息！');
+            }
+        }
+
+        // --- 按钮事件处理 ---
+        startButton.onclick = async () => {
+            if (!localStream) {
+                alert('媒体设备未就绪，请稍候或检查权限！');
+                return;
+            }
+            log('▶️ live.start → 用户点击开始直播，创建 PeerConnection...');
+            
+                                                peerConnection = new RTCPeerConnection({
+            
+                                                    iceServers: [
+            
+                                                        { urls: 'stun:stun.l.google.com:19302' },
+            
+                                                        { urls: 'stun:stun1.l.google.com:19302' },
+            
+                                                        { urls: 'stun:stun2.l.google.com:19302' },
+            
+                                                        { urls: 'stun:stun3.l.google.com:19302' },
+            
+                                                        { urls: 'stun:stun4.l.google.com:19302' },
+            
+                                                        { 
+            
+                                                          urls: "turn:openrelay.metered.ca:80",
+            
+                                                          username: "openrelayproject",
+            
+                                                          credential: "openrelayproject",
+            
+                                                        }
+            
+                                                    ] 
+            
+                                                });
+
+            // **新增：创建数据通道**
+            dataChannel = peerConnection.createDataChannel("chat");
+            dataChannel.onopen = () => log('💬 数据通道已开启。');
+            dataChannel.onclose = () => log('💬 数据通道已关闭。');
+            dataChannel.onerror = (error) => log(`❌ 数据通道错误: ${error}`);
+            
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
+                }
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                log(`🔄 live.connection.change → PeerConnection 状态: ${peerConnection.connectionState}`);
+            };
+            
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            log('⬆️ 将 Offer 发送给信令服务器...');
+            ws.send(JSON.stringify({ type: 'offer', offer: offer }));
+        };
+
+        stopButton.onclick = () => {
+            log('⏹️ live.stop → 直播推流结束');
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+        };
+
+        muteButton.onclick = () => {
+            if(localStream) localStream.getAudioTracks()[0].enabled = false;
+            sendDataChannelMessage('live.anchor.mute');
+        };
+        
+        unmuteButton.onclick = () => {
+            if(localStream) localStream.getAudioTracks()[0].enabled = true;
+            sendDataChannelMessage('live.anchor.unmute');
+        };
+
+        likeButton.onclick = () => sendDataChannelMessage('live.like', { user: '主播' });
+        
+        giftButton.onclick = () => sendDataChannelMessage('live.gift.send', { user: '主播', gift: '火箭', count: 1 });
+        
+        sendChatButton.onclick = () => {
+            if (chatInput.value) {
+                sendDataChannelMessage('live.chat.message', { user: '主播', text: chatInput.value });
+                chatInput.value = '';
+            }
+        };
+        
+        initMedia();
+    </script>
+</body>
+</html>
