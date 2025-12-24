@@ -74,6 +74,8 @@
         const stopButton = document.getElementById('stopButton');
         const chatInput = document.getElementById('chatInput');
         const sendChatButton = document.getElementById('sendChatButton');
+        const muteButton = document.getElementById('muteButton');
+        const unmuteButton = document.getElementById('unmuteButton');
 
         // --- App State ---
         let localStream;
@@ -82,6 +84,7 @@
         let userInfo = {};
         let roomInfo = {};
         let mutedViewersLocal = new Set(); // Local set of muted viewer persistentIds
+        let isAnchorMuted = false; // New state for anchor's own mute status
 
         // --- Logging ---
         function log(message) {
@@ -148,6 +151,7 @@
             updateViewerList();
             localStream = null; // Reset local stream if it was active
             localVideo.srcObject = null;
+            isAnchorMuted = false; // Reset anchor mute state
         };
         
         ws.onmessage = async event => {
@@ -197,6 +201,12 @@
             peerConnections.set(viewerId, pc);
 
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            // Set the audio track enabled status based on current anchor mute state
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !isAnchorMuted;
+            });
+
 
             const dc = pc.createDataChannel(`chat-${viewerId}`);
             dc.onopen = () => log(`💬 与 ${username} 的数据通道已开启。`);
@@ -304,11 +314,38 @@
             chatInput.value = '';
         };
 
+        function toggleLocalAudio(mute) {
+            if (!localStream) {
+                log('⚠️ 尚未获取到本地媒体流!');
+                return;
+            }
+
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !mute;
+            });
+            isAnchorMuted = mute;
+
+            const messageType = mute ? 'live.anchor.mute' : 'live.anchor.unmute';
+            const logMessage = mute ? '🔇 您的麦克风已静音。' : '🔊 您的麦克风已取消静音。';
+            log(logMessage);
+
+            // Notify viewers about anchor's mute status
+            // This assumes the server relays this message to all viewers.
+            ws.send(JSON.stringify({ type: messageType, payload: { anchorId: userInfo.persistentId, isMuted: mute } }));
+        }
+
+        muteButton.onclick = () => toggleLocalAudio(true);
+        unmuteButton.onclick = () => toggleLocalAudio(false);
+
         async function initMedia() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 localVideo.srcObject = localStream;
                 log('✅ 摄像头和麦克风已就绪。');
+                // Apply initial mute state if anchor was already muted
+                localStream.getAudioTracks().forEach(track => {
+                    track.enabled = !isAnchorMuted;
+                });
             } catch (e) {
                 log(`❌ 获取媒体设备失败: ${e.toString()}`);
             }
@@ -328,4 +365,5 @@
         // Initialize
         initializeUser();
         initMedia();
+
     </script>

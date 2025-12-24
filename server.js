@@ -68,6 +68,10 @@ wss.on('connection', ws => {
             case 'kick-user':
                 handleKickUser(clientInfo, message.payload);
                 break;
+            case 'live.anchor.mute':
+            case 'live.anchor.unmute':
+                handleAnchorMuteStatus(clientInfo, message);
+                break;
             
             default:
                 console.warn(`⚠️  [${logId}] Unhandled message type: ${message.type}`);
@@ -107,7 +111,8 @@ function handleCreateRoom(clientInfo, payload) {
         name: roomName,
         broadcasterId: broadcasterId,
         viewers: new Set(),
-        mutedViewers: new Set() // Initialize muted viewers set
+        mutedViewers: new Set(), // Initialize muted viewers set
+        isAnchorMuted: false // New state for anchor's own mute status
     };
     rooms.set(roomId, newRoom);
     persistentIdToRoomId.set(broadcasterId, roomId);
@@ -160,6 +165,14 @@ function handleJoinRoom(clientInfo, payload) {
         clientInfo.ws.send(JSON.stringify({
             type: 'viewer-muted-status',
             payload: { viewerId, isMuted: true }
+        }));
+    }
+
+    // Notify the joining viewer of the anchor's current mute status
+    if (room.isAnchorMuted) {
+        clientInfo.ws.send(JSON.stringify({
+            type: 'live.anchor.mute',
+            payload: { anchorId: room.broadcasterId, isMuted: true }
         }));
     }
 }
@@ -276,6 +289,29 @@ function handleUnmuteViewer(broadcasterInfo, payload) {
     }
     // Notify broadcaster to update their UI
     broadcasterInfo.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: false } }));
+}
+
+function handleAnchorMuteStatus(clientInfo, message) {
+    const { type, payload } = message;
+    const { anchorId, isMuted } = payload;
+
+    const roomId = persistentIdToRoomId.get(anchorId);
+    const room = rooms.get(roomId);
+
+    if (!room || room.broadcasterId !== anchorId) {
+        return console.warn(`⚠️  Anchor mute status update by non-broadcaster or invalid room.`);
+    }
+
+    room.isAnchorMuted = isMuted; // Update anchor's mute status in room state
+    console.log(`${isMuted ? '🔇' : '🔊'} Anchor ${anchorId} in room ${roomId} ${isMuted ? 'muted' : 'unmuted'}.`);
+
+    // Broadcast to all viewers in the room
+    room.viewers.forEach(viewerId => {
+        const viewerClient = clients.get(persistentIdToClientId.get(viewerId));
+        if (viewerClient) {
+            viewerClient.ws.send(JSON.stringify({ type: type, payload: { anchorId, isMuted } }));
+        }
+    });
 }
 
 function routeP2PMessage(senderId, message) {
