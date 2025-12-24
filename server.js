@@ -295,26 +295,57 @@ function routeP2PMessage(senderId, message) {
 }
 
 function handleKickUser(broadcasterInfo, payload) {
+
     const { targetId } = payload; // viewer's persistentId
+
     const roomId = persistentIdToRoomId.get(broadcasterInfo.persistentId);
+
     const room = rooms.get(roomId);
 
+
+
     if (!room || room.broadcasterId !== broadcasterInfo.persistentId) {
+
         return console.warn(`⚠️  Kick attempt by non-broadcaster or invalid room.`);
+
     }
+
+
 
     if (!room.viewers.has(targetId)) {
+
         return console.warn(`⚠️  Kick attempt on user ${targetId} not in room ${roomId}.`);
+
     }
 
+
+
     const targetClientId = persistentIdToClientId.get(targetId);
+
     const targetClient = clients.get(targetClientId);
 
+
+
     if (targetClient) {
+
         console.log(`👢 Kicking user ${targetId} from room ${roomId}.`);
+
         targetClient.ws.send(JSON.stringify({ type: 'kicked', payload: { reason: '您已被主播移出直播间' } }));
+
         
+
         // Use a timeout to ensure the message is sent before the connection is closed
+
         setTimeout(() => {
+
             targetClient.ws.close();
+
         }, 100);
+
+        
+
+        // No need to call handleLeaveRoom, as the 'close' event will trigger cleanup
+
+    }
+
+}
