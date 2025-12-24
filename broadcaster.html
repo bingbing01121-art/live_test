@@ -3,190 +3,239 @@
 <head>
     <title>主播端 (Broadcaster)</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
-        h1 { color: #1a73e8; }
-        video { border: 2px solid #ccc; border-radius: 8px; width: 520px; height: 390px; background: #000; display: block; margin-bottom: 15px;}
-        .controls button, .controls input { margin: 5px; padding: 10px 15px; border-radius: 5px; border: none; cursor: pointer; font-size: 14px; }
+        body { font-family: sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; display: flex; gap: 20px; }
+        .main-content { flex: 3; }
+        .sidebar { flex: 1; background: #fff; padding: 15px; border-radius: 8px; border: 1px solid #ddd; }
+        h1, h2, h3 { color: #1a73e8; }
+        h2 { border-bottom: 2px solid #e0e0e0; padding-bottom: 5px; }
+        video { border: 2px solid #ccc; border-radius: 8px; width: 100%; height: auto; background: #000; display: block; margin-bottom: 15px;}
+        .controls button, .controls input { margin: 5px 0; padding: 10px 15px; border-radius: 5px; border: none; cursor: pointer; font-size: 14px; width: calc(100% - 32px); }
         .controls button { background-color: #1a73e8; color: white; }
         .controls button:hover { background-color: #155ab6; }
+        .controls button:disabled { background-color: #ccc; }
         .controls input { border: 1px solid #ccc; padding: 9px; }
-        #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 300px; overflow-y: auto; margin-top: 20px; }
+        #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 200px; overflow-y: auto; margin-top: 20px; }
+        #userInfo, #roomInfo { background-color: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
+        .viewer-list li { display: flex; justify-content: space-between; align-items: center; padding: 5px; border-bottom: 1px solid #eee; }
+        .viewer-list button { background-color: #e74c3c; font-size: 12px; padding: 5px 10px; }
     </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
 </head>
 <body>
-    <h1>主播端 (Broadcaster)</h1>
-    <video id="localVideo" autoplay muted playsinline></video>
-    <div class="controls">
-        <button id="startButton">开始直播 (live.start)</button>
-        <button id="stopButton">结束直播 (live.stop)</button>
-        <hr>
-        <button id="muteButton">静音 (live.anchor.mute)</button>
-        <button id="unmuteButton">取消静音 (live.anchor.unmute)</button>
-        <br>
-        <button id="likeButton">点赞 (live.like)</button>
-        <button id="giftButton">送礼物 (live.gift.send)</button>
-        <br>
-        <input type="text" id="chatInput" placeholder="输入弹幕...">
-        <button id="sendChatButton">发送弹幕 (live.chat.message)</button>
+    <div class="main-content">
+        <h1>主播端 (Broadcaster)</h1>
+        <div id="userInfo"></div>
+        <div id="roomInfo" style="display:none;"></div>
+        
+        <video id="localVideo" autoplay muted playsinline></video>
+
+        <div class="controls" id="roomCreationControls">
+            <input type="text" id="roomNameInput" placeholder="输入房间名...">
+            <button id="createRoomButton">创建并开始直播</button>
+        </div>
+        
+        <div class="controls" id="inCallControls" style="display:none;">
+            <button id="stopButton">结束直播</button>
+            <hr>
+            <button id="muteButton">静音</button>
+            <button id="unmuteButton">取消静音</button>
+            <hr>
+            <input type="text" id="chatInput" placeholder="输入弹幕...">
+            <button id="sendChatButton">发送弹幕</button>
+        </div>
+        <h3>事件日志:</h3>
+        <div id="logs"></div>
     </div>
-    <h3>事件日志:</h3>
-    <div id="logs"></div>
+    <div class="sidebar">
+        <h2>观众列表</h2>
+        <ul id="viewerList" class="viewer-list"></ul>
+    </div>
 
     <script>
+        // --- DOM Elements ---
         const localVideo = document.getElementById('localVideo');
-        const startButton = document.getElementById('startButton');
-        const stopButton = document.getElementById('stopButton');
-        const muteButton = document.getElementById('muteButton');
-        const unmuteButton = document.getElementById('unmuteButton');
-        const likeButton = document.getElementById('likeButton');
-        const giftButton = document.getElementById('giftButton');
-        const chatInput = document.getElementById('chatInput');
-        const sendChatButton = document.getElementById('sendChatButton');
         const logs = document.getElementById('logs');
+        const userInfoDisplay = document.getElementById('userInfo');
+        const roomInfoDisplay = document.getElementById('roomInfo');
+        const viewerList = document.getElementById('viewerList');
 
+        const roomCreationControls = document.getElementById('roomCreationControls');
+        const inCallControls = document.getElementById('inCallControls');
+        const roomNameInput = document.getElementById('roomNameInput');
+        const createRoomButton = document.getElementById('createRoomButton');
+        const stopButton = document.getElementById('stopButton');
+
+        // --- App State ---
+        let localStream;
+        let peerConnections = new Map();
+        let dataChannels = new Map();
+        let userInfo = {};
+        let roomInfo = {};
+
+        // --- Logging ---
         function log(message) {
             console.log(message);
             logs.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}\n`;
             logs.scrollTop = logs.scrollHeight;
         }
 
-        const ws = new WebSocket('wss://live-test-a52n.onrender.com');
-        let localStream;
-        let peerConnection;
-        let dataChannel; // 新增：用于数据传输（聊天、礼物等）
+        // --- User & Room Initialization ---
+        function initializeUser() {
+            const storedUserInfo = localStorage.getItem('broadcasterUserInfo');
+            if (storedUserInfo) {
+                userInfo = JSON.parse(storedUserInfo);
+            } else {
+                const username = prompt("请输入您的用户名:", "主播" + Math.floor(Math.random() * 1000));
+                userInfo = { persistentId: uuid.v4(), username: username || "匿名主播" };
+                localStorage.setItem('broadcasterUserInfo', JSON.stringify(userInfo));
+            }
+            userInfoDisplay.innerHTML = `<strong>用户:</strong> ${userInfo.username} <small>(ID: ${userInfo.persistentId.substring(0, 4)})</small>`;
+        }
+        
+        // --- UI Update Functions ---
+        function updateViewerList() {
+            viewerList.innerHTML = '';
+            peerConnections.forEach((pc, viewerId) => {
+                const client = pc.clientInfo;
+                if (!client) return;
+                const li = document.createElement('li');
+                li.innerHTML = `<span>${client.username} <small>(${viewerId.substring(0, 4)})</small></span>
+                              <button onclick="kickUser('${viewerId}')">踢出</button>`;
+                viewerList.appendChild(li);
+            });
+        }
 
-        // --- WebSocket 事件处理 ---
-        ws.onopen = () => log('📡 已成功连接到信令服务器。');
-        ws.onerror = (error) => log(`❌ WebSocket 连接错误: ${error.message || '未知错误'}。请确认信令服务器是否已启动。`);
+        // --- Signaling Server Connection ---
+        const ws = new WebSocket('wss://live-test-a52n.onrender.com');
+
+        ws.onopen = () => {
+            log('📡 连接到信令服务器。');
+            ws.send(JSON.stringify({
+                type: 'register',
+                payload: { persistentId: userInfo.persistentId, username: userInfo.username }
+            }));
+        };
+
+        ws.onerror = (error) => log(`❌ WebSocket 错误: ${error.message || '未知错误'}。`);
+        
         ws.onmessage = async event => {
             const message = JSON.parse(event.data);
-            log(`📩 收到信令消息: ${message.type}`);
-            if (message.type === 'answer' && peerConnection) {
-                log('🤝 收到观众的 Answer，正在设置远端描述...');
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
-            } else if (message.type === 'candidate' && peerConnection) {
-                 log('📍 收到观众的 ICE Candidate，正在添加...');
-                 try {
-                     await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                 } catch (e) {
-                     log(`⚠️ 添加 ICE Candidate 失败: ${e.toString()}`);
-                 }
+            const fromId = message.payload?.senderId || message.payload?.viewerId || 'server';
+            log(`📩 [${fromId.substring(0,4)}] → ${message.type}`);
+
+            switch (message.type) {
+                case 'registered':
+                    log(`✍️  用户注册成功 (ID: ${message.payload.userId.substring(0,4)})`);
+                    break;
+                case 'room-created':
+                    roomInfo = { id: message.payload.roomId, name: message.payload.roomName };
+                    roomInfoDisplay.innerHTML = `<strong>房间:</strong> ${roomInfo.name} <small>(ID: ${roomInfo.id.substring(0, 4)})</small>`;
+                    roomInfoDisplay.style.display = 'block';
+                    roomCreationControls.style.display = 'none';
+                    inCallControls.style.display = 'block';
+                    log(`🚪 房间 "${roomInfo.name}" 创建成功!`);
+                    break;
+                case 'new-viewer':
+                    handleNewViewer(message.payload);
+                    break;
+                case 'viewer-left':
+                    handleViewerDisconnect(message.payload.viewerId);
+                    break;
+                case 'answer':
+                    handleAnswer(message.payload);
+                    break;
+                case 'candidate':
+                    handleCandidate(message.payload);
+                    break;
             }
         };
 
-        // --- 媒体设备初始化 ---
+        // --- WebRTC Handlers ---
+        async function handleNewViewer(payload) {
+            const { viewerId, username } = payload;
+            log(`👀 新观众: ${username} (${viewerId.substring(0,4)})`);
+            
+            if (!localStream) return log('⚠️ 主播尚未开播!');
+
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            pc.clientInfo = { id: viewerId, username: username }; // Attach info to PC object
+            peerConnections.set(viewerId, pc);
+
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            const dc = pc.createDataChannel(`chat-${viewerId}`);
+            dc.onopen = () => log(`💬 与 ${username} 的数据通道已开启。`);
+            dataChannels.set(viewerId, dc);
+
+            pc.onicecandidate = e => {
+                if (e.candidate) {
+                    ws.send(JSON.stringify({ type: 'candidate', payload: { targetId: viewerId, candidate: e.candidate }}));
+                }
+            };
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                    handleViewerDisconnect(viewerId);
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            
+            ws.send(JSON.stringify({ type: 'offer', payload: { targetId: viewerId, offer: offer }}));
+            updateViewerList();
+        }
+
+        function handleViewerDisconnect(viewerId) {
+            const pc = peerConnections.get(viewerId);
+            if (pc) {
+                log(`👋 观众 ${pc.clientInfo.username} 已离开。`);
+                pc.close();
+                peerConnections.delete(viewerId);
+            }
+            if (dataChannels.has(viewerId)) dataChannels.delete(viewerId);
+            updateViewerList();
+        }
+        
+        async function handleAnswer({ senderId, answer }) {
+            const pc = peerConnections.get(senderId);
+            if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        }
+
+        async function handleCandidate({ senderId, candidate }) {
+            const pc = peerConnections.get(senderId);
+            if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+
+        // --- Controls ---
+        createRoomButton.onclick = async () => {
+            if (!localStream) {
+                await initMedia();
+                if (!localStream) return alert('无法访问摄像头或麦克风，请检查权限。');
+            }
+            const roomName = roomNameInput.value;
+            if (!roomName) return alert('请输入房间名!');
+            
+            ws.send(JSON.stringify({ type: 'create-room', payload: { roomName } }));
+        };
+        
         async function initMedia() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 localVideo.srcObject = localStream;
-                log('✅ live.ready → 直播初始化完成，摄像头和麦克风已就绪。');
+                log('✅ 摄像头和麦克风已就绪。');
             } catch (e) {
-                log(`❌ 获取媒体设备失败: ${e.toString()}。请检查浏览器权限设置。`);
-                alert('无法访问摄像头或麦克风，请检查浏览器权限设置。');
+                log(`❌ 获取媒体设备失败: ${e.toString()}`);
             }
         }
 
-        // --- 数据通道消息发送辅助函数 ---
-        function sendDataChannelMessage(type, payload) {
-            if (dataChannel && dataChannel.readyState === 'open') {
-                const message = JSON.stringify({ type, payload });
-                dataChannel.send(message);
-                log(`📤 (通过数据通道发送) ${type}: ${JSON.stringify(payload) || '无内容'}`);
-            } else {
-                log('❌ 数据通道未开启或未创建，无法发送消息！');
-            }
+        function kickUser(viewerId) {
+            log(`👢 正在踢出观众 ${viewerId.substring(0,4)}...`);
+            ws.send(JSON.stringify({ type: 'kick-user', payload: { targetId: viewerId } }));
+            // Disconnect is handled by server, which triggers 'close' event client-side
         }
 
-        // --- 按钮事件处理 ---
-        startButton.onclick = async () => {
-            if (!localStream) {
-                alert('媒体设备未就绪，请稍候或检查权限！');
-                return;
-            }
-            log('▶️ live.start → 用户点击开始直播，创建 PeerConnection...');
-            
-                                                peerConnection = new RTCPeerConnection({
-            
-                                                    iceServers: [
-            
-                                                        { urls: 'stun:stun.l.google.com:19302' },
-            
-                                                        { urls: 'stun:stun1.l.google.com:19302' },
-            
-                                                        { urls: 'stun:stun2.l.google.com:19302' },
-            
-                                                        { urls: 'stun:stun3.l.google.com:19302' },
-            
-                                                        { urls: 'stun:stun4.l.google.com:19302' },
-            
-                                                        { 
-            
-                                                          urls: "turn:openrelay.metered.ca:80",
-            
-                                                          username: "openrelayproject",
-            
-                                                          credential: "openrelayproject",
-            
-                                                        }
-            
-                                                    ] 
-            
-                                                });
-
-            // **新增：创建数据通道**
-            dataChannel = peerConnection.createDataChannel("chat");
-            dataChannel.onopen = () => log('💬 数据通道已开启。');
-            dataChannel.onclose = () => log('💬 数据通道已关闭。');
-            dataChannel.onerror = (error) => log(`❌ 数据通道错误: ${error}`);
-            
-            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-            
-            peerConnection.onicecandidate = event => {
-                if (event.candidate) {
-                    ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
-                }
-            };
-
-            peerConnection.onconnectionstatechange = () => {
-                log(`🔄 live.connection.change → PeerConnection 状态: ${peerConnection.connectionState}`);
-            };
-            
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            
-            log('⬆️ 将 Offer 发送给信令服务器...');
-            ws.send(JSON.stringify({ type: 'offer', offer: offer }));
-        };
-
-        stopButton.onclick = () => {
-            log('⏹️ live.stop → 直播推流结束');
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-        };
-
-        muteButton.onclick = () => {
-            if(localStream) localStream.getAudioTracks()[0].enabled = false;
-            sendDataChannelMessage('live.anchor.mute');
-        };
-        
-        unmuteButton.onclick = () => {
-            if(localStream) localStream.getAudioTracks()[0].enabled = true;
-            sendDataChannelMessage('live.anchor.unmute');
-        };
-
-        likeButton.onclick = () => sendDataChannelMessage('live.like', { user: '主播' });
-        
-        giftButton.onclick = () => sendDataChannelMessage('live.gift.send', { user: '主播', gift: '火箭', count: 1 });
-        
-        sendChatButton.onclick = () => {
-            if (chatInput.value) {
-                sendDataChannelMessage('live.chat.message', { user: '主播', text: chatInput.value });
-                chatInput.value = '';
-            }
-        };
-        
+        // Initialize
+        initializeUser();
         initMedia();
     </script>
 </body>

@@ -4,130 +4,205 @@
     <title>观众端 (Viewer)</title>
     <style>
         body { font-family: sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
-        h1 { color: #1a73e8; }
-        video { border: 2px solid #ccc; border-radius: 8px; width: 520px; height: 390px; background: #000; display: block; margin-bottom: 15px;}
-        #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 300px; overflow-y: auto; margin-top: 20px; }
+        h1, h2 { color: #1a73e8; }
+        video { border: 2px solid #ccc; border-radius: 8px; width: 100%; max-width: 640px; background: #000; display: block; margin-bottom: 15px;}
+        #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 200px; overflow-y: auto; margin-top: 20px; }
+        #userInfo { background-color: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
+        .room-list { list-style: none; padding: 0; }
+        .room-list li { background: #fff; border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .room-list button { background-color: #28a745; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; }
+        #in-call-view button { background-color: #dc3545; }
     </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
 </head>
 <body>
     <h1>观众端 (Viewer)</h1>
-    <video id="remoteVideo" autoplay playsinline></video>
-    <h3>事件日志:</h3>
-    <div id="logs"></div>
+    <div id="userInfo"></div>
+
+    <!-- Room Selection View -->
+    <div id="room-selection-view">
+        <h2>可用直播间</h2>
+        <ul id="roomList" class="room-list"></ul>
+    </div>
+
+    <!-- In-Call View -->
+    <div id="in-call-view" style="display:none;">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <button id="leaveRoomButton">离开房间</button>
+        <h3>事件日志:</h3>
+        <div id="logs"></div>
+    </div>
 
     <script>
+        // --- DOM Elements ---
+        const userInfoDisplay = document.getElementById('userInfo');
+        const roomSelectionView = document.getElementById('room-selection-view');
+        const inCallView = document.getElementById('in-call-view');
+        const roomList = document.getElementById('roomList');
         const remoteVideo = document.getElementById('remoteVideo');
         const logs = document.getElementById('logs');
+        const leaveRoomButton = document.getElementById('leaveRoomButton');
 
-        function log(message) {
-            console.log(message);
-            logs.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}
-`;
-            logs.scrollTop = logs.scrollHeight;
+        // --- App State ---
+        let peerConnection;
+        let userInfo = {};
+        let broadcasterId = null;
+        let currentRoomId = null;
+
+        // --- UI State Management ---
+        function showRoomSelection() {
+            inCallView.style.display = 'none';
+            roomSelectionView.style.display = 'block';
+            log('🔄 回到房间列表。');
+            ws.send(JSON.stringify({ type: 'list-rooms' })); // Refresh room list
+        }
+        function showInCallView() {
+            roomSelectionView.style.display = 'none';
+            inCallView.style.display = 'block';
         }
 
+        // --- Logging ---
+        function log(message) {
+            console.log(message);
+            if(inCallView.style.display === 'block') {
+                logs.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}\n`;
+                logs.scrollTop = logs.scrollHeight;
+            }
+        }
+
+        // --- User & Room List ---
+        function initializeUser() {
+            const storedUserInfo = localStorage.getItem('viewerUserInfo');
+            if (storedUserInfo) userInfo = JSON.parse(storedUserInfo);
+            else {
+                const username = prompt("请输入您的昵称:", "观众" + Math.floor(Math.random() * 1000));
+                userInfo = { persistentId: uuid.v4(), username: username || "匿名观众" };
+                localStorage.setItem('viewerUserInfo', JSON.stringify(userInfo));
+            }
+            userInfoDisplay.innerHTML = `<strong>用户:</strong> ${userInfo.username} <small>(${userInfo.persistentId.substring(0, 4)})</small>`;
+        }
+
+        function renderRoomList(rooms) {
+            roomList.innerHTML = '';
+            if (rooms.length === 0) {
+                roomList.innerHTML = '<li>当前没有直播间。</li>';
+                return;
+            }
+            rooms.forEach(room => {
+                const li = document.createElement('li');
+                li.innerHTML = `<div><strong>${room.roomName}</strong> <br><small>主播: ${room.broadcasterName} | 观众: ${room.viewerCount}</small></div>
+                              <button onclick="joinRoom('${room.roomId}')">加入</button>`;
+                roomList.appendChild(li);
+            });
+        }
+
+        // --- Signaling & Actions ---
         const ws = new WebSocket('wss://live-test-a52n.onrender.com');
-        let peerConnection; // 保存 WebRTC PeerConnection 对象
 
-        // --- WebSocket 事件处理 ---
         ws.onopen = () => {
-            log('📡 已成功连接到信令服务器。');
-            // 观众端连接信令服务器时，可以发送一个“观众加入”的事件
-            // ws.send(JSON.stringify({ type: 'live.audience.join', user: '观众_User123' }));
+            console.log('📡 连接到信令服务器。');
+            ws.send(JSON.stringify({
+                type: 'register',
+                payload: { persistentId: userInfo.persistentId, username: userInfo.username }
+            }));
         };
-        ws.onerror = (error) => log(`❌ WebSocket 连接错误: ${error.message || '未知错误'}。请确认信令服务器是否已启动。`);
-        
+
         ws.onmessage = async event => {
-            // 观众端主要接收主播发来的 Offer 和 ICE Candidate
             const message = JSON.parse(event.data);
-            log(`📩 收到信令消息: ${message.type}`);
+            console.log(`📩 [server] → ${message.type}`);
 
-            if (message.type === 'offer' && !peerConnection) {
-                // 收到主播的 Offer，且尚未创建 PeerConnection
-                log('🤝 收到主播的 Offer，正在创建 PeerConnection 和 Answer...');
-                peerConnection = new RTCPeerConnection({
-                    iceServers: [{urls: 'stun:stun.l.google.com:19302'}] // 使用相同的 STUN 服务器
-                });
-
-                // --- PeerConnection 事件处理 ---
-
-                // 监听网络连接状态变化
-                peerConnection.onconnectionstatechange = () => {
-                    log(`🔄 live.connection.change → PeerConnection 状态: ${peerConnection.connectionState}`);
-                    if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
-                        log('🛑 live.error → PeerConnection 连接断开或失败。');
-                        // 可以在这里清理或尝试重连
-                    } else if (peerConnection.connectionState === 'closed') {
-                         log('👋 live.audience.leave → 直播连接已关闭。');
-                         peerConnection = null; // 清理对象
-                    }
-                };
-
-                // 监听 ICE Candidate 事件，发现网络候选者时发送给主播
-                peerConnection.onicecandidate = e => {
-                    if (e.candidate) {
-                        log('⬆️ 发现并发送 ICE Candidate 到信令服务器...');
-                        ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
-                    }
-                };
-
-                // 监听主播发来的媒体流 (video/audio tracks)
-                peerConnection.ontrack = event => {
-                    log('▶️ live.play → 收到远程媒体流，开始播放直播。');
-                    log(`ontrack event: ${JSON.stringify(event.streams.map(s => s.id))}, tracks: ${JSON.stringify(event.track.id)}`);
-                    if (event.streams && event.streams[0]) {
-                        if (remoteVideo.srcObject !== event.streams[0]) {
-                            remoteVideo.srcObject = event.streams[0];
-                            log('✅ remoteVideo.srcObject 已设置。');
-                        } else {
-                            log('ℹ️ remoteVideo.srcObject 已经设置，无需重复。');
-                        }
-                    } else {
-                        log('❌ ontrack 事件中没有找到媒体流。');
-                    }
-                };
-
-                // 监听数据通道（主播可能通过数据通道发送聊天、点赞等消息）
-                peerConnection.ondatachannel = event => {
-                    const dataChannel = event.channel;
-                    dataChannel.onmessage = e => {
-                        const msg = JSON.parse(e.data);
-                        // 根据收到的消息类型记录日志
-                        if(msg.type === 'live.chat.message') log(`💬 live.chat.message → 收到新弹幕: [${msg.payload.user}] ${msg.payload.text}`);
-                        else if(msg.type === 'live.like') log(`👍 live.like → 收到点赞来自: ${msg.payload.user}`);
-                        else if(msg.type === 'live.gift.send') log(`🎁 live.gift.receive → 收到礼物 [${msg.payload.gift}] 来自: ${msg.payload.user}`);
-                        else if(msg.type === 'live.anchor.mute') log('🔇 live.anchor.mute → 主播已静音');
-                        else if(msg.type === 'live.anchor.unmute') log('🔊 live.anchor.unmute → 主播已取消静音');
-                    };
-                    dataChannel.onopen = () => log('💬 数据通道已开启。');
-                    dataChannel.onclose = () => log('💬 数据通道已关闭。');
-                };
-                
-                // 设置主播的 Offer 为远端描述
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
-                
-                // 创建 Answer
-                log('📄 正在创建 Answer (会话描述)...');
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer); // 设置为本地描述
-                
-                // 将 Answer 通过信令服务器发送给主播
-                log('⬆️ 将 Answer 发送给信令服务器...');
-                ws.send(JSON.stringify({ type: 'answer', answer: answer }));
-
-            } else if (message.type === 'candidate' && peerConnection) {
-                // 收到主播的 ICE Candidate，添加到 PeerConnection
-                log('📍 收到主播的 ICE Candidate，正在添加...');
-                try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                } catch (e) {
-                    log(`⚠️ 添加 ICE Candidate 失败: ${e.toString()}`);
-                }
-            } else if (message.type === 'live.audience.join') {
-                // 如果需要，可以在这里处理观众加入的消息
-                // log(`👨‍👩‍👧‍👦 收到观众加入消息：${message.user}`);
+            switch (message.type) {
+                case 'registered':
+                    ws.send(JSON.stringify({ type: 'list-rooms' }));
+                    break;
+                case 'room-list':
+                    renderRoomList(message.payload);
+                    break;
+                case 'joined-room':
+                    currentRoomId = message.payload.roomId;
+                    log(`✅ 成功加入房间 ${currentRoomId.substring(0,4)}`);
+                    showInCallView();
+                    break;
+                case 'offer':
+                    handleOffer(message.payload);
+                    break;
+                case 'candidate':
+                    handleCandidate(message.payload);
+                    break;
+                case 'room-closed':
+                    alert(`房间 "${message.payload.roomId.substring(0,4)}" 已关闭。`);
+                    cleanupConnection();
+                    showRoomSelection();
+                    break;
+                case 'kicked':
+                    alert(`你已被主播移出房间。`);
+                    cleanupConnection();
+                    showRoomSelection();
+                    break;
             }
         };
+        
+        function joinRoom(roomId) {
+            ws.send(JSON.stringify({ type: 'join-room', payload: { roomId } }));
+        }
+
+        function leaveRoom() {
+            if (currentRoomId) {
+                ws.send(JSON.stringify({ type: 'leave-room' }));
+                cleanupConnection();
+                showRoomSelection();
+            }
+        }
+        leaveRoomButton.onclick = leaveRoom;
+
+        // --- WebRTC Handlers ---
+        async function handleOffer(payload) {
+            if (peerConnection) return;
+            broadcasterId = payload.senderId;
+            log(`🤝 收到来自主播 ${broadcasterId.substring(0,4)} 的 Offer...`);
+
+            peerConnection = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            peerConnection.onicecandidate = e => {
+                if (e.candidate) {
+                    ws.send(JSON.stringify({ type: 'candidate', payload: { targetId: broadcasterId, candidate: e.candidate }}));
+                }
+            };
+            peerConnection.ontrack = e => {
+                log('▶️ 收到远程媒体流!');
+                if (remoteVideo.srcObject !== e.streams[0]) remoteVideo.srcObject = e.streams[0];
+            };
+            peerConnection.onconnectionstatechange = () => {
+                log(`🔄 连接状态: ${peerConnection.connectionState}`);
+                if (['disconnected', 'failed', 'closed'].includes(peerConnection.connectionState)) {
+                    cleanupConnection();
+                    showRoomSelection();
+                }
+            };
+            
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.offer));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            
+            ws.send(JSON.stringify({ type: 'answer', payload: { targetId: broadcasterId, answer: answer }}));
+        }
+
+        async function handleCandidate(payload) {
+            if (peerConnection) await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        }
+
+        function cleanupConnection() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            remoteVideo.srcObject = null;
+            broadcasterId = null;
+            currentRoomId = null;
+            log('🧹 清理连接资源。');
+        }
+
+        // --- Initial Load ---
+        initializeUser();
     </script>
 </body>
 </html>
