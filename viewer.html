@@ -31,6 +31,14 @@
             border-radius: 5px;
             margin-right: 5px;
         }
+        #in-call-view .controls button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #in-call-view .controls input:disabled {
+            background-color: #eee;
+            cursor: not-allowed;
+        }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
 </head>
@@ -75,6 +83,7 @@
         let userInfo = {};
         let broadcasterId = null;
         let currentRoomId = null;
+        let isMuted = false; // New state for mute status
 
         // --- UI State Management ---
         function showRoomSelection() {
@@ -82,10 +91,22 @@
             roomSelectionView.style.display = 'block';
             console.log('🔄 回到房间列表。');
             ws.send(JSON.stringify({ type: 'list-rooms' }));
+            isMuted = false; // Reset mute status when leaving room
+            updateChatControlsState();
         }
         function showInCallView() {
             roomSelectionView.style.display = 'none';
             inCallView.style.display = 'block';
+        }
+
+        function updateChatControlsState() {
+            chatInput.disabled = isMuted;
+            sendChatButton.disabled = isMuted;
+            if (isMuted) {
+                chatInput.placeholder = '您已被禁言';
+            } else {
+                chatInput.placeholder = '输入弹幕...';
+            }
         }
 
         // --- Logging ---
@@ -107,6 +128,7 @@
                 localStorage.setItem('viewerUserInfo', JSON.stringify(userInfo));
             }
             userInfoDisplay.innerHTML = `<strong>用户:</strong> ${userInfo.username} <small>(${userInfo.persistentId.substring(0, 4)})</small>`;
+            updateChatControlsState(); // Set initial state
         }
 
         function renderRoomList(rooms) {
@@ -166,6 +188,9 @@
                     cleanupConnection();
                     showRoomSelection();
                     break;
+                case 'viewer-muted-status':
+                    handleViewerMutedStatus(message.payload);
+                    break;
             }
         };
         
@@ -183,6 +208,10 @@
         leaveRoomButton.onclick = leaveRoom;
 
         function sendChatMessage() {
+            if (isMuted) {
+                log('🚫 您已被禁言，无法发送弹幕。');
+                return;
+            }
             const text = chatInput.value;
             if (!text) return;
             if (dataChannel && dataChannel.readyState === 'open') {
@@ -248,6 +277,12 @@
             if (peerConnection) await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
         }
 
+        function handleViewerMutedStatus(payload) {
+            isMuted = payload.isMuted;
+            log(`${isMuted ? '🤫 您已被禁言' : '🔊 您已被解除禁言'}`);
+            updateChatControlsState();
+        }
+
         function cleanupConnection() {
             if (peerConnection) {
                 peerConnection.close();
@@ -260,6 +295,7 @@
             remoteVideo.srcObject = null;
             broadcasterId = null;
             currentRoomId = null;
+            isMuted = false; // Reset mute status
             log('🧹 清理连接资源。');
         }
 

@@ -7,7 +7,7 @@ const wss = new WebSocket.Server({ port: PORT });
 // --- Data Structures ---
 const clients = new Map(); // Maps connection-specific clientId -> { id, ws, persistentId, username }
 const persistentIdToClientId = new Map(); // Maps persistentId -> clientId
-const rooms = new Map(); // Maps roomId -> { id, name, broadcasterId, viewers: Set<persistentId> }
+const rooms = new Map(); // Maps roomId -> { id, name, broadcasterId, viewers: Set<persistentId>, mutedViewers: Set<persistentId> }
 const persistentIdToRoomId = new Map(); // Maps persistentId -> roomId
 
 console.log(`✅ Signaling server for multi-room chat started on ws://localhost:${PORT}`);
@@ -49,6 +49,14 @@ wss.on('connection', ws => {
                 break;
             case 'leave-room':
                 handleLeaveRoom(clientInfo);
+                break;
+
+            // Mute/Unmute Functionality
+            case 'mute-viewer':
+                handleMuteViewer(clientInfo, message.payload);
+                break;
+            case 'unmute-viewer':
+                handleUnmuteViewer(clientInfo, message.payload);
                 break;
 
             // WebRTC Signaling & In-Room Communication
@@ -98,7 +106,8 @@ function handleCreateRoom(clientInfo, payload) {
         id: roomId,
         name: roomName,
         broadcasterId: broadcasterId,
-        viewers: new Set()
+        viewers: new Set(),
+        mutedViewers: new Set() // Initialize muted viewers set
     };
     rooms.set(roomId, newRoom);
     persistentIdToRoomId.set(broadcasterId, roomId);
@@ -138,7 +147,19 @@ function handleJoinRoom(clientInfo, payload) {
     if (broadcasterClient) {
         broadcasterClient.ws.send(JSON.stringify({
             type: 'new-viewer',
-            payload: { viewerId, username: clientInfo.username }
+            payload: { 
+                viewerId, 
+                username: clientInfo.username,
+                isMuted: room.mutedViewers.has(viewerId) // Send initial mute status
+            }
+        }));
+    }
+
+    // Notify the joining viewer of their own mute status
+    if (room.mutedViewers.has(viewerId)) {
+        clientInfo.ws.send(JSON.stringify({
+            type: 'viewer-muted-status',
+            payload: { viewerId, isMuted: true }
         }));
     }
 }
@@ -151,6 +172,7 @@ function handleLeaveRoom(clientInfo) {
     const room = rooms.get(roomId);
     if (room) {
         room.viewers.delete(viewerId);
+        // Do not remove from mutedViewers here, as the user might rejoin
         console.log(`👋 Viewer ${viewerId} left room ${roomId}`);
 
         // Notify broadcaster
@@ -185,12 +207,75 @@ function handleDisconnect(clientId) {
             }
         });
         rooms.delete(roomId);
+        // Muted viewers state for the room is naturally cleared as the room is deleted.
     } else if (role === 'viewer' && roomId) {
-        handleLeaveRoom(clientInfo);
+        const room = rooms.get(roomId);
+        if (room) {
+            // Remove viewer from the room's viewer list
+            room.viewers.delete(persistentId);
+            // Also remove from mutedViewers if they were muted
+            room.mutedViewers.delete(persistentId);
+            console.log(`👋 Viewer ${persistentId} left room ${roomId} (disconnected).`);
+
+            // Notify broadcaster
+            const broadcasterClient = clients.get(persistentIdToClientId.get(room.broadcasterId));
+            if (broadcasterClient) {
+                broadcasterClient.ws.send(JSON.stringify({ type: 'viewer-left', payload: { viewerId: persistentId } }));
+            }
+        }
+        persistentIdToRoomId.delete(persistentId);
     }
 
     clients.delete(clientId);
     persistentIdToClientId.delete(persistentId);
+}
+
+function handleMuteViewer(broadcasterInfo, payload) {
+    const { targetId } = payload; // The viewer's persistentId
+    const roomId = persistentIdToRoomId.get(broadcasterInfo.persistentId);
+    const room = rooms.get(roomId);
+
+    if (!room || room.broadcasterId !== broadcasterInfo.persistentId) {
+        return console.warn(`⚠️  Mute attempt by non-broadcaster or invalid room.`);
+    }
+    if (!room.viewers.has(targetId)) {
+        return console.warn(`⚠️  Mute attempt on user ${targetId} not in room ${roomId}.`);
+    }
+
+    room.mutedViewers.add(targetId);
+    console.log(`🤫 Viewer ${targetId} in room ${roomId} has been muted.`);
+
+    // Notify target viewer
+    const targetViewerClient = clients.get(persistentIdToClientId.get(targetId));
+    if (targetViewerClient) {
+        targetViewerClient.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: true } }));
+    }
+    // Notify broadcaster to update their UI
+    broadcasterInfo.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: true } }));
+}
+
+function handleUnmuteViewer(broadcasterInfo, payload) {
+    const { targetId } = payload; // The viewer's persistentId
+    const roomId = persistentIdToRoomId.get(broadcasterInfo.persistentId);
+    const room = rooms.get(roomId);
+
+    if (!room || room.broadcasterId !== broadcasterInfo.persistentId) {
+        return console.warn(`⚠️  Unmute attempt by non-broadcaster or invalid room.`);
+    }
+    if (!room.viewers.has(targetId)) {
+        return console.warn(`⚠️  Unmute attempt on user ${targetId} not in room ${roomId}.`);
+    }
+
+    room.mutedViewers.delete(targetId);
+    console.log(`🔊 Viewer ${targetId} in room ${roomId} has been unmuted.`);
+
+    // Notify target viewer
+    const targetViewerClient = clients.get(persistentIdToClientId.get(targetId));
+    if (targetViewerClient) {
+        targetViewerClient.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: false } }));
+    }
+    // Notify broadcaster to update their UI
+    broadcasterInfo.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: false } }));
 }
 
 function routeP2PMessage(senderId, message) {
@@ -233,7 +318,3 @@ function handleKickUser(broadcasterInfo, payload) {
         setTimeout(() => {
             targetClient.ws.close();
         }, 100);
-        
-        // No need to call handleLeaveRoom, as the 'close' event will trigger cleanup
-    }
-}

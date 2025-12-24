@@ -17,7 +17,15 @@
         #logs { white-space: pre-wrap; font-family: monospace; background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 200px; overflow-y: auto; margin-top: 20px; }
         #userInfo, #roomInfo { background-color: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 15px; }
         .viewer-list li { display: flex; justify-content: space-between; align-items: center; padding: 5px; border-bottom: 1px solid #eee; }
-        .viewer-list button { background-color: #e74c3c; font-size: 12px; padding: 5px 10px; }
+        .viewer-list .viewer-actions button { /* Specific styles for buttons within viewer list actions */
+            font-size: 12px;
+            padding: 5px 10px;
+            margin-left: 5px;
+            width: auto; /* Override general button width */
+        }
+        .viewer-list .kick-button { background-color: #e74c3c; } /* Red for kick */
+        .viewer-list .mute-button { background-color: #5bc0de; } /* Info blue for mute */
+        .viewer-list .unmute-button { background-color: #f0ad4e; } /* Warning orange for unmute */
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
 </head>
@@ -73,6 +81,7 @@
         let dataChannels = new Map();
         let userInfo = {};
         let roomInfo = {};
+        let mutedViewersLocal = new Set(); // Local set of muted viewer persistentIds
 
         // --- Logging ---
         function log(message) {
@@ -100,9 +109,17 @@
             peerConnections.forEach((pc, viewerId) => {
                 const client = pc.clientInfo;
                 if (!client) return;
+
+                const isMuted = mutedViewersLocal.has(viewerId);
+                const muteButtonText = isMuted ? '解除禁言' : '禁言';
+                const muteButtonClass = isMuted ? 'unmute-button' : 'mute-button';
+
                 const li = document.createElement('li');
                 li.innerHTML = `<span>${client.username} <small>(${viewerId.substring(0, 4)})</small></span>
-                              <button onclick="kickUser('${viewerId}')">踢出</button>`;
+                                <div class="viewer-actions">
+                                    <button class="${muteButtonClass}" onclick="toggleMuteViewer('${viewerId}', ${isMuted})">${muteButtonText}</button>
+                                    <button class="kick-button" onclick="kickUser('${viewerId}')">踢出</button>
+                                </div>`;
                 viewerList.appendChild(li);
             });
         }
@@ -127,7 +144,10 @@
             peerConnections.forEach(pc => pc.close());
             peerConnections.clear();
             dataChannels.clear();
+            mutedViewersLocal.clear(); // Clear muted state on disconnect
             updateViewerList();
+            localStream = null; // Reset local stream if it was active
+            localVideo.srcObject = null;
         };
         
         ws.onmessage = async event => {
@@ -159,13 +179,16 @@
                 case 'candidate':
                     handleCandidate(message.payload);
                     break;
+                case 'viewer-muted-status': // Server tells us the mute status of a viewer
+                    handleViewerMuteStatus(message.payload);
+                    break;
             }
         };
 
         // --- WebRTC Handlers ---
         async function handleNewViewer(payload) {
-            const { viewerId, username } = payload;
-            log(`👀 新观众: ${username} (${viewerId.substring(0,4)})`);
+            const { viewerId, username, isMuted } = payload; // isMuted will come from server
+            log(`👀 新观众: ${username} (${viewerId.substring(0,4)})${isMuted ? ' (已禁言)' : ''}`);
             
             if (!localStream) return log('⚠️ 主播尚未开播!');
 
@@ -180,7 +203,11 @@
             dc.onmessage = event => {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'live.chat.message') {
-                    log(`💬 [${msg.payload.user}] ${msg.payload.text}`);
+                    if (mutedViewersLocal.has(viewerId)) {
+                        log(`🤫 [${msg.payload.user}] (被禁言) 尝试发送: ${msg.payload.text}`);
+                    } else {
+                        log(`💬 [${msg.payload.user}] ${msg.payload.text}`);
+                    }
                 }
             };
             dataChannels.set(viewerId, dc);
@@ -200,6 +227,10 @@
             await pc.setLocalDescription(offer);
             
             ws.send(JSON.stringify({ type: 'offer', payload: { targetId: viewerId, offer: offer }}));
+            // If the viewer is already muted, add them to our local set
+            if (isMuted) {
+                mutedViewersLocal.add(viewerId);
+            }
             updateViewerList();
         }
 
@@ -211,6 +242,7 @@
                 peerConnections.delete(viewerId);
             }
             if (dataChannels.has(viewerId)) dataChannels.delete(viewerId);
+            mutedViewersLocal.delete(viewerId); // Also remove from muted list
             updateViewerList();
         }
         
@@ -222,6 +254,18 @@
         async function handleCandidate({ senderId, candidate }) {
             const pc = peerConnections.get(senderId);
             if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+
+        function handleViewerMuteStatus(payload) {
+            const { viewerId, isMuted } = payload;
+            if (isMuted) {
+                mutedViewersLocal.add(viewerId);
+                log(`🤫 观众 ${viewerId.substring(0,4)} 被禁言。`);
+            } else {
+                mutedViewersLocal.delete(viewerId);
+                log(`🔊 观众 ${viewerId.substring(0,4)} 解除禁言。`);
+            }
+            updateViewerList();
         }
 
         // --- Controls ---
@@ -275,9 +319,13 @@
             ws.send(JSON.stringify({ type: 'kick-user', payload: { targetId: viewerId } }));
         }
 
+        function toggleMuteViewer(viewerId, currentlyMuted) {
+            const messageType = currentlyMuted ? 'unmute-viewer' : 'mute-viewer';
+            log(`${currentlyMuted ? '🔊' : '🤫'} 发送指令: ${messageType} 观众 ${viewerId.substring(0,4)}`);
+            ws.send(JSON.stringify({ type: messageType, payload: { targetId: viewerId } }));
+        }
+
         // Initialize
         initializeUser();
         initMedia();
     </script>
-</body>
-</html>
