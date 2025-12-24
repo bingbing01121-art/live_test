@@ -64,6 +64,8 @@
         const roomNameInput = document.getElementById('roomNameInput');
         const createRoomButton = document.getElementById('createRoomButton');
         const stopButton = document.getElementById('stopButton');
+        const chatInput = document.getElementById('chatInput');
+        const sendChatButton = document.getElementById('sendChatButton');
 
         // --- App State ---
         let localStream;
@@ -117,6 +119,16 @@
         };
 
         ws.onerror = (error) => log(`❌ WebSocket 错误: ${error.message || '未知错误'}。`);
+        ws.onclose = () => {
+            log('🔌 与服务器的连接已断开。');
+            inCallControls.style.display = 'none';
+            roomCreationControls.style.display = 'block';
+            roomInfoDisplay.style.display = 'none';
+            peerConnections.forEach(pc => pc.close());
+            peerConnections.clear();
+            dataChannels.clear();
+            updateViewerList();
+        };
         
         ws.onmessage = async event => {
             const message = JSON.parse(event.data);
@@ -223,7 +235,31 @@
             
             ws.send(JSON.stringify({ type: 'create-room', payload: { roomName } }));
         };
+
+        stopButton.onclick = () => {
+            log('⏹️ 正在结束直播...');
+            ws.close();
+        };
         
+        sendChatButton.onclick = () => {
+            const text = chatInput.value;
+            if (!text) return;
+            
+            const message = { 
+                type: 'live.chat.message', 
+                payload: { user: userInfo.username, text: text }
+            };
+            const messageString = JSON.stringify(message);
+
+            log(`💬 (我) ${text}`);
+            dataChannels.forEach(dc => {
+                if (dc.readyState === 'open') {
+                    dc.send(messageString);
+                }
+            });
+            chatInput.value = '';
+        };
+
         async function initMedia() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -237,7 +273,6 @@
         function kickUser(viewerId) {
             log(`👢 正在踢出观众 ${viewerId.substring(0,4)}...`);
             ws.send(JSON.stringify({ type: 'kick-user', payload: { targetId: viewerId } }));
-            // Disconnect is handled by server, which triggers 'close' event client-side
         }
 
         // Initialize
