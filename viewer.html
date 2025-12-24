@@ -11,7 +11,26 @@
         .room-list { list-style: none; padding: 0; }
         .room-list li { background: #fff; border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
         .room-list button { background-color: #28a745; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; }
-        #in-call-view button { background-color: #dc3545; }
+        
+        /* Consistent Button Styles */
+        #in-call-view .controls button, #in-call-view > button {
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        #in-call-view #leaveRoomButton {
+             background-color: #dc3545; /* Keep leave button red for distinction */
+        }
+        #in-call-view .controls input {
+            border: 1px solid #ccc;
+            padding: 9px;
+            border-radius: 5px;
+            margin-right: 5px;
+        }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
 </head>
@@ -29,6 +48,11 @@
     <div id="in-call-view" style="display:none;">
         <video id="remoteVideo" autoplay playsinline></video>
         <button id="leaveRoomButton">离开房间</button>
+        <hr>
+        <div class="controls">
+            <input type="text" id="chatInput" placeholder="输入弹幕...">
+            <button id="sendChatButton">发送</button>
+        </div>
         <h3>事件日志:</h3>
         <div id="logs"></div>
     </div>
@@ -42,9 +66,12 @@
         const remoteVideo = document.getElementById('remoteVideo');
         const logs = document.getElementById('logs');
         const leaveRoomButton = document.getElementById('leaveRoomButton');
+        const chatInput = document.getElementById('chatInput');
+        const sendChatButton = document.getElementById('sendChatButton');
 
         // --- App State ---
         let peerConnection;
+        let dataChannel;
         let userInfo = {};
         let broadcasterId = null;
         let currentRoomId = null;
@@ -53,8 +80,8 @@
         function showRoomSelection() {
             inCallView.style.display = 'none';
             roomSelectionView.style.display = 'block';
-            log('🔄 回到房间列表。');
-            ws.send(JSON.stringify({ type: 'list-rooms' })); // Refresh room list
+            console.log('🔄 回到房间列表。');
+            ws.send(JSON.stringify({ type: 'list-rooms' }));
         }
         function showInCallView() {
             roomSelectionView.style.display = 'none';
@@ -91,7 +118,7 @@
             rooms.forEach(room => {
                 const li = document.createElement('li');
                 li.innerHTML = `<div><strong>${room.roomName}</strong> <br><small>主播: ${room.broadcasterName} | 观众: ${room.viewerCount}</small></div>
-                              <button onclick="joinRoom('${room.roomId}')">加入</button>`;
+                              <button onclick="joinRoom('${room.roomId}')" style="background-color: #28a745;">加入</button>`;
                 roomList.appendChild(li);
             });
         }
@@ -130,7 +157,7 @@
                     handleCandidate(message.payload);
                     break;
                 case 'room-closed':
-                    alert(`房间 "${message.payload.roomId.substring(0,4)}" 已关闭。`);
+                    alert(`房间已关闭。`);
                     cleanupConnection();
                     showRoomSelection();
                     break;
@@ -155,6 +182,24 @@
         }
         leaveRoomButton.onclick = leaveRoom;
 
+        function sendChatMessage() {
+            const text = chatInput.value;
+            if (!text) return;
+            if (dataChannel && dataChannel.readyState === 'open') {
+                const message = { 
+                    type: 'live.chat.message', 
+                    payload: { user: userInfo.username, text: text } 
+                };
+                dataChannel.send(JSON.stringify(message));
+                log(`💬 (我) ${text}`);
+                chatInput.value = '';
+            } else {
+                log('⚠️ 无法发送弹幕，数据通道未连接。');
+            }
+        }
+        sendChatButton.onclick = sendChatMessage;
+
+
         // --- WebRTC Handlers ---
         async function handleOffer(payload) {
             if (peerConnection) return;
@@ -170,6 +215,19 @@
             peerConnection.ontrack = e => {
                 log('▶️ 收到远程媒体流!');
                 if (remoteVideo.srcObject !== e.streams[0]) remoteVideo.srcObject = e.streams[0];
+            };
+            peerConnection.ondatachannel = event => {
+                dataChannel = event.channel;
+                dataChannel.onmessage = e => {
+                    const msg = JSON.parse(e.data);
+                    if(msg.type === 'live.chat.message') log(`💬 [${msg.payload.user}] ${msg.payload.text}`);
+                    else if(msg.type === 'live.like') log(`👍 [${msg.payload.user}] 送出点赞`);
+                    else if(msg.type === 'live.gift.send') log(`🎁 [${msg.payload.user}] 送出礼物: ${msg.payload.gift}`);
+                    else if(msg.type === 'live.anchor.mute') log('🔇 主播已静音');
+                    else if(msg.type === 'live.anchor.unmute') log('🔊 主播已取消静音');
+                };
+                dataChannel.onopen = () => log('💬 数据通道已开启。');
+                dataChannel.onclose = () => log('💬 数据通道已关闭。');
             };
             peerConnection.onconnectionstatechange = () => {
                 log(`🔄 连接状态: ${peerConnection.connectionState}`);
@@ -194,6 +252,10 @@
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
+            }
+            if (dataChannel) {
+                dataChannel.close();
+                dataChannel = null;
             }
             remoteVideo.srcObject = null;
             broadcasterId = null;

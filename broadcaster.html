@@ -165,6 +165,12 @@
 
             const dc = pc.createDataChannel(`chat-${viewerId}`);
             dc.onopen = () => log(`💬 与 ${username} 的数据通道已开启。`);
+            dc.onmessage = event => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'live.chat.message') {
+                    log(`💬 [${msg.payload.user}] ${msg.payload.text}`);
+                }
+            };
             dataChannels.set(viewerId, dc);
 
             pc.onicecandidate = e => {
