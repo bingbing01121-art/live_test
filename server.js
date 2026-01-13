@@ -65,7 +65,6 @@ wss.on('connection', ws => {
             case 'leave-room':
                 handleLeaveRoom(clientInfo);
                 break;
-
             // 静音/取消静音功能
             case 'mute-viewer':
                 handleMuteViewer(clientInfo, message.payload);
@@ -73,12 +72,7 @@ wss.on('connection', ws => {
             case 'unmute-viewer':
                 handleUnmuteViewer(clientInfo, message.payload);
                 break;
-            
-            // 请求ICE服务器配置
-            case 'request-ice-servers':
-                handleRequestIceServers(clientInfo);
-                break;
-
+            // (request-ice-servers case removed as ICE servers are now sent with 'registered')
             // WebRTC 信令及房间内通信
             case 'offer':
             case 'answer':
@@ -92,7 +86,6 @@ wss.on('connection', ws => {
             case 'live.anchor.unmute':
                 handleAnchorMuteStatus(clientInfo, message);
                 break;
-            
             default:
                 console.warn(`⚠️  [${logId}] 未处理的消息类型: ${message.type}`);
         }
@@ -123,7 +116,13 @@ function handleRegistration(clientId, payload) {
     console.log(`✍️   已将 ${clientId} 注册为持久化用户 ${persistentId} (${username})`);
 
     // 向客户端发送注册成功的确认消息
-    clientInfo.ws.send(JSON.stringify({ type: 'registered', payload: { userId: persistentId } }));
+    clientInfo.ws.send(JSON.stringify({ 
+        type: 'registered', 
+        payload: { 
+            userId: persistentId,
+            iceServers: config.iceServers // <-- 添加ICE服务器列表
+        } 
+    }));
 }
 
 /**
@@ -364,17 +363,7 @@ function handleUnmuteViewer(broadcasterInfo, payload) {
     broadcasterInfo.ws.send(JSON.stringify({ type: 'viewer-muted-status', payload: { viewerId: targetId, isMuted: false } }));
 }
 
-/**
- * 处理请求ICE服务器配置的消息
- * @param {object} clientInfo - 客户端信息
- */
-function handleRequestIceServers(clientInfo) {
-    console.log(`🧊 客户端 ${clientInfo.persistentId || clientInfo.id} 请求ICE服务器配置。`);
-    clientInfo.ws.send(JSON.stringify({ 
-        type: 'ice-servers-response', 
-        payload: { iceServers: config.iceServers } 
-    }));
-}
+
 
 /**
  * 处理主播静音状态消息 (主播自己静音/取消静音)
