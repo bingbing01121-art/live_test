@@ -7,8 +7,8 @@ module.exports = {
                              'username': '000000002083647736',
                              'credential': '4rrveXxVAGyhGl7lorJasxF1aZ4='
            },
-        {
+           {
             urls: 'stun:stun.l.google.com:19302'
-        }
+            }
     ]
 };
