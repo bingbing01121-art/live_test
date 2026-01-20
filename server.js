@@ -136,7 +136,7 @@ function handleRegistration(clientId, payload) {
  * @param {object} payload - 消息负载，包含房间名称
  */
 function handleCreateRoom(clientInfo, payload) {
-    const { roomName } = payload;
+    const { roomName, password } = payload; // Added password
     if (!roomName) return console.error('❌ 创建房间失败: 未提供房间名称。');
     
     const roomId = uuidv4(); // 生成唯一的房间ID
@@ -151,7 +151,8 @@ function handleCreateRoom(clientInfo, payload) {
         mutedViewers: new Set(), // 存储被禁言观众的持久化ID
         isAnchorMuted: false, // 主播自身是否静音的状态
         status: 'active', // 房间状态：'active' / 'inactive' / 'pending_rejoin'
-        reconnectTimeout: null // 重连超时ID
+        reconnectTimeout: null, // 重连超时ID
+        password: password || null // Store the password, or null if none provided
     };
     rooms.set(roomId, newRoom); // 将新房间添加到房间列表中
     persistentIdToRoomId.set(broadcasterId, roomId); // 记录主播所在的房间
@@ -168,7 +169,7 @@ function handleCreateRoom(clientInfo, payload) {
      * @param {object} payload - 消息负载，包含房间ID和房间名称
      */
     function handleRejoinRoom(clientInfo, payload) {
-        const { roomId, roomName } = payload;
+        const { roomId, roomName, password } = payload;
         const persistentId = clientInfo.persistentId;
     
         if (!persistentId) {
@@ -193,7 +194,10 @@ function handleCreateRoom(clientInfo, payload) {
             room.name = roomName;
             console.log(`ℹ️  房间 ${roomId} 的名称已更新为 "${roomName}"。`);
         }
-    
+        // Update password if provided, or clear if empty
+        room.password = password || null; // Update the password
+        console.log(`ℹ️  房间 ${roomId} 的密码已更新。`);
+        
             // 假设房间在断开时被标记为非活跃，这里可以重新激活
             if (room.reconnectTimeout) {
                 clearTimeout(room.reconnectTimeout);
@@ -223,7 +227,8 @@ function handleListRooms(clientInfo) {
         roomName: room.name,
         // 获取主播的用户名
         broadcasterName: clients.get(persistentIdToClientId.get(room.broadcasterId))?.username,
-        viewerCount: room.viewers.size // 房间内的观众数量
+        viewerCount: room.viewers.size, // 房间内的观众数量
+        isPasswordProtected: room.password !== null // Indicate if password protected
     }));
     // 向客户端发送房间列表
     clientInfo.ws.send(JSON.stringify({ type: 'room-list', payload: roomList }));
@@ -235,14 +240,21 @@ function handleListRooms(clientInfo) {
  * @param {object} payload - 消息负载，包含房间ID
  */
 function handleJoinRoom(clientInfo, payload) {
-    const { roomId } = payload;
+    const { roomId, password } = payload; // Added password to payload destructuring
     const room = rooms.get(roomId);
     if (!room) {
         // 如果房间不存在，发送错误消息
         return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到' } }));
     }
 
+    // Check for password
+    if (room.password !== null && room.password !== password) {
+        console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入密码保护房间 ${roomId}，但密码错误。`);
+        return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
+    }
+
     const viewerId = clientInfo.persistentId; // 观众的持久化ID
+    // ... rest of the function ...
     room.viewers.add(viewerId); // 将观众添加到房间的观众列表
     persistentIdToRoomId.set(viewerId, roomId); // 记录观众所在的房间
     clientInfo.role = 'viewer'; // 设置客户端角色为观众
