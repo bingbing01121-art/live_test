@@ -7,13 +7,15 @@ const PORT = process.env.PORT || 8088;
 // 创建WebSocket服务器
 const wss = new WebSocket.Server({ port: PORT });
 
+const RECONNECT_TIMEOUT_MS = 20000; // 20 seconds for broadcaster reconnect grace period
+
 // --- 数据结构 ---
 // 存储所有连接的客户端信息，键为客户端的临时ID (clientId)，值为包含客户端ID、WebSocket连接、持久化ID和用户名的对象
 const clients = new Map(); // Maps connection-specific clientId -> { id, ws, persistentId, username }
 // 存储持久化ID到临时客户端ID的映射，方便通过持久化ID查找客户端
 const persistentIdToClientId = new Map(); // Maps persistentId -> clientId
-// 存储所有房间的信息，键为房间ID (roomId)，值为包含房间ID、名称、主播ID、观众列表和被禁言观众列表的对象
-const rooms = new Map(); // Maps roomId -> { id, name, broadcasterId, viewers: Set<persistentId>, mutedViewers: Set<persistentId> }
+// 存储所有房间的信息，键为房间ID (roomId)，值为包含房间ID、名称、主播ID、观众列表、被禁言观众列表、主播静音状态、房间状态和重连超时ID的对象
+const rooms = new Map(); // Maps roomId -> { id, name, broadcasterId, viewers: Set<persistentId>, mutedViewers: Set<persistentId>, isAnchorMuted, status, reconnectTimeout }
 // 存储持久化ID到房间ID的映射，方便查找用户所在的房间
 const persistentIdToRoomId = new Map(); // Maps persistentId -> roomId
 
@@ -55,6 +57,9 @@ wss.on('connection', ws => {
                 break;
             case 'create-room':
                 handleCreateRoom(clientInfo, message.payload);
+                break;
+            case 'rejoin-room': // New case for handling broadcaster rejoin
+                handleRejoinRoom(clientInfo, message.payload);
                 break;
             case 'list-rooms':
                 handleListRooms(clientInfo);
@@ -144,7 +149,9 @@ function handleCreateRoom(clientInfo, payload) {
         broadcasterId: broadcasterId,
         viewers: new Set(), // 存储观众的持久化ID
         mutedViewers: new Set(), // 存储被禁言观众的持久化ID
-        isAnchorMuted: false // 主播自身是否静音的状态
+        isAnchorMuted: false, // 主播自身是否静音的状态
+        status: 'active', // 房间状态：'active' / 'inactive' / 'pending_rejoin'
+        reconnectTimeout: null // 重连超时ID
     };
     rooms.set(roomId, newRoom); // 将新房间添加到房间列表中
     persistentIdToRoomId.set(broadcasterId, roomId); // 记录主播所在的房间
@@ -152,10 +159,60 @@ function handleCreateRoom(clientInfo, payload) {
 
     console.log(`🚪 房间已创建: "${roomName}" (ID: ${roomId}) 由 ${broadcasterId} 创建`);
     // 向主播发送房间创建成功的消息
-    clientInfo.ws.send(JSON.stringify({ type: 'room-created', payload: { roomId, roomName } }));
-}
-
-/**
+            clientInfo.ws.send(JSON.stringify({ type: 'room-created', payload: { roomId, roomName } }));
+    }
+    
+    /**
+     * 处理重新加入房间消息 (主播重连后)
+     * @param {object} clientInfo - 客户端信息
+     * @param {object} payload - 消息负载，包含房间ID和房间名称
+     */
+    function handleRejoinRoom(clientInfo, payload) {
+        const { roomId, roomName } = payload;
+        const persistentId = clientInfo.persistentId;
+    
+        if (!persistentId) {
+            return console.error(`❌ 重连房间失败: 客户端 ${clientInfo.id} 未注册持久化ID。`);
+        }
+    
+        const room = rooms.get(roomId);
+    
+        if (!room || room.broadcasterId !== persistentId) {
+            // 如果房间不存在，或主播ID不匹配，可能房间已关闭或错误
+            console.warn(`⚠️  主播 ${persistentId} 尝试重连房间 ${roomId} 失败: 房间不存在或主播ID不匹配。`);
+            // 通知主播重连失败，可能需要创建新房间
+            return clientInfo.ws.send(JSON.stringify({ type: 'rejoin-room-failed', payload: { message: '房间不存在或主播身份不匹配' } }));
+        }
+    
+        // 更新主播的当前WebSocket连接，确保其关联到房间
+        persistentIdToClientId.set(persistentId, clientInfo.id);
+        clientInfo.role = 'broadcaster'; // 确保角色是主播
+    
+        // 可以在这里更新房间名称，如果主播在重连时修改了名称（虽然通常不会）
+        if (room.name !== roomName) {
+            room.name = roomName;
+            console.log(`ℹ️  房间 ${roomId} 的名称已更新为 "${roomName}"。`);
+        }
+    
+            // 假设房间在断开时被标记为非活跃，这里可以重新激活
+            if (room.reconnectTimeout) {
+                clearTimeout(room.reconnectTimeout);
+                room.reconnectTimeout = null;
+            }
+            room.status = 'active'; // 主播重连成功，房间重新激活
+        
+            console.log(`✅ 主播 ${persistentId} 成功重连房间 "${room.name}" (ID: ${roomId})。`);        // 向主播发送重连成功的消息
+        clientInfo.ws.send(JSON.stringify({ type: 'room-rejoined', payload: { roomId: room.id, roomName: room.name } }));
+    
+        // 通知所有观众主播已重新连接（如果他们在线且还在该房间）
+        room.viewers.forEach(viewerPersistentId => {
+            const viewerClient = clients.get(persistentIdToClientId.get(viewerPersistentId));
+            if (viewerClient && viewerPersistentId !== persistentId) { // 避免发给自己
+                viewerClient.ws.send(JSON.stringify({ type: 'broadcaster-rejoined', payload: { roomId: room.id, broadcasterId: persistentId } }));
+            }
+        });
+    }
+    /**
  * 处理列出房间消息
  * @param {object} clientInfo - 客户端信息
  */
@@ -268,17 +325,33 @@ function handleDisconnect(clientId) {
     // 如果是主播断开连接
     if (role === 'broadcaster' && roomId) {
         const room = rooms.get(roomId);
-        console.log(`📣 房间 ${roomId} 的主播断开连接。正在关闭房间。`);
-        // 通知所有观众房间已关闭
+        if (!room) return; // Should not happen if roomId is valid
+
+        room.status = 'pending_rejoin';
+        console.log(`📣 房间 ${roomId} 的主播断开连接。房间进入待重连状态。`);
+
+        // 通知所有观众主播暂时断开连接 (而不是房间关闭)
         room.viewers.forEach(viewerId => {
             const viewerClient = clients.get(persistentIdToClientId.get(viewerId));
             if (viewerClient) {
-                viewerClient.ws.send(JSON.stringify({ type: 'room-closed', payload: { roomId } }));
-                persistentIdToRoomId.delete(viewerId); // 清除观众的房间信息
+                viewerClient.ws.send(JSON.stringify({ type: 'broadcaster-disconnected', payload: { roomId } }));
             }
         });
-        rooms.delete(roomId); // 从房间列表中删除房间
-        // 房间删除后，被禁言的观众状态自然也清除了
+
+        // 设置一个超时，如果主播在此时间内未能重连，则关闭房间
+        room.reconnectTimeout = setTimeout(() => {
+            console.log(`❌ 房间 ${roomId} 的主播重连超时，正在关闭房间。`);
+            // 通知所有观众房间已关闭
+            room.viewers.forEach(viewerId => {
+                const viewerClient = clients.get(persistentIdToClientId.get(viewerId));
+                if (viewerClient) {
+                    viewerClient.ws.send(JSON.stringify({ type: 'room-closed', payload: { roomId } }));
+                    persistentIdToRoomId.delete(viewerId); // 清除观众的房间信息
+                }
+            });
+            rooms.delete(roomId); // 从房间列表中删除房间
+            console.log(`🗑️  房间 ${roomId} 已被删除。`);
+        }, RECONNECT_TIMEOUT_MS);
     } 
     // 如果是观众断开连接
     else if (role === 'viewer' && roomId) {
