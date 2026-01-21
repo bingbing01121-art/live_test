@@ -144,6 +144,7 @@ function handleRegistration(clientId, payload) {
  */
 function handleCreateRoom(clientInfo, payload) {
     const { roomName, password } = payload; // Added password
+    console.log(`[handleCreateRoom] Received password: "${password}" for room: "${roomName}"`); // New log: received password
     if (!roomName) return console.error('❌ 创建房间失败: 未提供房间名称。');
     
     const roomId = uuidv4(); // 生成唯一的房间ID
@@ -161,6 +162,7 @@ function handleCreateRoom(clientInfo, payload) {
         reconnectTimeout: null, // 重连超时ID，用于存储 setTimeout 的ID，以便清除
         password: password || null // 存储房间密码，如果客户端未提供则为 null。支持密码保护的房间。
     };
+    console.log(`[handleCreateRoom] Stored room password: "${newRoom.password}" for room: "${roomName}" (ID: ${roomId})`); // New log: stored password
     rooms.set(roomId, newRoom); // 将新房间添加到房间列表中
     persistentIdToRoomId.set(broadcasterId, roomId); // 记录主播所在的房间
     clientInfo.role = 'broadcaster'; // 设置客户端角色为主播
