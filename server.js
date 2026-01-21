@@ -243,8 +243,7 @@ function handleJoinRoom(clientInfo, payload) {
         if (!room) {
             console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入房间
       ${roomId}，但房间未找到。`);
-            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload:
-      message: '房间未找到', code: 'ROOM_NOT_FOUND' } }));
+            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到', code: 'ROOM_NOT_FOUND' } }));
         }
 
         // 检查房间是否受密码保护，并验证提供的密码
@@ -254,8 +253,7 @@ function handleJoinRoom(clientInfo, payload) {
       password !== password) {
             console.warn(`⚠️  观众 ${clientInfo.persistentId}
       尝试加入密码保护房间 ${roomId}，但密码错误。`);
-            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload:
-      message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
+            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
         }
 
         const viewerId = clientInfo.persistentId; // 观众的持久化ID
@@ -278,8 +276,7 @@ function handleJoinRoom(clientInfo, payload) {
                 payload: {
                     viewerId,
                     username: clientInfo.username,
-                    isMuted: room.mutedViewers.has(viewerId) //
-      发送初始的禁言状态
+                    isMuted: room.mutedViewers.has(viewerId) // 发送初始的禁言状态
                 }
             }));
         }
