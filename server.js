@@ -247,7 +247,7 @@ function handleListRooms(clientInfo) {
             name: room.name,
             broadcasterName: broadcasterName,
             viewerCount: room.viewers.size,
-            hasPassword: !!room.password // 关键：告知客户端房间是否需要密码
+            isPasswordProtected: !!room.password // 关键：告知客户端房间是否需要密码
         };
     });
 
@@ -262,105 +262,57 @@ function handleListRooms(clientInfo) {
     console.log(`📤  已向 ${clientInfo.persistentId || clientInfo.id} 发送 ${roomListForClient.length} 个活跃房间的信息。`);
 }
 
-    /**
- * 处理列出房间消息
- * @param {object} clientInfo - 客户端信息
- */
-function handleJoinRoom(clientInfo, payload) {
-         // === 修复开始 ===
-         const roomId = payload.roomId; // 从 payload 中获取 roomId
-         const password = payload.password; // 从 payload 中获取密码
-        // 假设 rooms 是一个全局的 Map 或对象，存储了所有活跃的房间信息
-        // 如果 rooms 是 Map，使用 rooms.get(roomId)
-        // 如果 rooms 是普通对象，使用 rooms[roomId]
-        const room = rooms.get(roomId); // 从全局 rooms 集合中获取房间对象
-        // === 修复结束 ===
-
-        // 检查房间是否存在
-        if (!room) {
-            console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入房间
-      ${roomId}，但房间未找到。`);
-            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到', code: 'ROOM_NOT_FOUND' } }));
-        }
-
-        // 检查房间是否受密码保护，并验证提供的密码
-        // 注意：room.password 存储的是房间创建时的密码，password
-      是观众尝试加入时提供的密码
-        if (room.password !== null && room.password !== undefined && room.
-      password !== password) {
-            console.warn(`⚠️  观众 ${clientInfo.persistentId}
-      尝试加入密码保护房间 ${roomId}，但密码错误。`);
-            return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
-        }
-
-        const viewerId = clientInfo.persistentId; // 观众的持久化ID
-        // ... rest of the function ...
-        room.viewers.add(viewerId); // 将观众添加到房间的观众列表
-        persistentIdToRoomId.set(viewerId, roomId); // 记录观众所在的房间
-        clientInfo.role = 'viewer'; // 设置客户端角色为观众
-
-        console.log(`🔗 观众 ${viewerId} 加入房间 ${roomId}`);
-        // 向观众发送加入房间成功的消息
-        clientInfo.ws.send(JSON.stringify({ type: 'joined-room', payload: {
-      roomId } }));
-
-        // 通知主播有新观众加入
-        const broadcasterClient = clients.get(persistentIdToClientId.get(room.
-      broadcasterId));
-        if (broadcasterClient) {
-            broadcasterClient.ws.send(JSON.stringify({
-                type: 'new-viewer',
-                payload: {
-                    viewerId,
-                    username: clientInfo.username,
-                    isMuted: room.mutedViewers.has(viewerId) // 发送初始的禁言状态
-                }
-            }));
-        }
-    }
-
-
 /**
  * 处理加入房间消息
  * @param {object} clientInfo - 客户端信息
- * @param {object} payload - 消息负载，包含房间ID
+ * @param {object} payload - 消息负载，包含房间ID和可选的密码
  */
 function handleJoinRoom(clientInfo, payload) {
+    const { roomId, password } = payload;
+    const room = rooms.get(roomId);
+
     // 检查房间是否存在
     if (!room) {
-        return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到' } }));
+        console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入房间 ${roomId}，但房间未找到。`);
+        return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到', code: 'ROOM_NOT_FOUND' } }));
     }
 
     // 检查房间是否受密码保护，并验证提供的密码
-    if (room.password !== null && room.password !== password) {
+    if (room.password && room.password !== password) {
         console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入密码保护房间 ${roomId}，但密码错误。`);
         return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
     }
 
-    const viewerId = clientInfo.persistentId; // 观众的持久化ID
-    // ... rest of the function ...
-    room.viewers.add(viewerId); // 将观众添加到房间的观众列表
-    persistentIdToRoomId.set(viewerId, roomId); // 记录观众所在的房间
-    clientInfo.role = 'viewer'; // 设置客户端角色为观众
+    const viewerId = clientInfo.persistentId;
+    room.viewers.add(viewerId);
+    persistentIdToRoomId.set(viewerId, roomId);
+    clientInfo.role = 'viewer';
 
     console.log(`🔗 观众 ${viewerId} 加入房间 ${roomId}`);
+    
     // 向观众发送加入房间成功的消息
-    clientInfo.ws.send(JSON.stringify({ type: 'joined-room', payload: { roomId } }));
+    clientInfo.ws.send(JSON.stringify({ 
+        type: 'joined-room', 
+        payload: { 
+            roomId: room.id,
+            broadcasterId: room.broadcasterId // 将主播ID也发给观众
+        } 
+    }));
 
     // 通知主播有新观众加入
     const broadcasterClient = clients.get(persistentIdToClientId.get(room.broadcasterId));
     if (broadcasterClient) {
         broadcasterClient.ws.send(JSON.stringify({
             type: 'new-viewer',
-            payload: { 
-                viewerId, 
+            payload: {
+                viewerId,
                 username: clientInfo.username,
-                isMuted: room.mutedViewers.has(viewerId) // 发送初始的禁言状态
+                isMuted: room.mutedViewers.has(viewerId)
             }
         }));
     }
 
-    // 如果观众已被禁言，通知观众自己的禁言状态
+    // 如果观众之前被禁言，加入时通知其状态
     if (room.mutedViewers.has(viewerId)) {
         clientInfo.ws.send(JSON.stringify({
             type: 'viewer-muted-status',
@@ -368,7 +320,7 @@ function handleJoinRoom(clientInfo, payload) {
         }));
     }
 
-    // 通知加入的观众主播当前的静音状态
+    // 通知新加入的观众关于主播当前的静音状态
     if (room.isAnchorMuted) {
         clientInfo.ws.send(JSON.stringify({
             type: 'live.anchor.mute',
