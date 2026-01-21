@@ -225,6 +225,43 @@ function handleCreateRoom(clientInfo, payload) {
             }
         });
     }
+
+/**
+ * 处理列出房间消息
+ * @param {object} clientInfo - 请求列表的客户端信息
+ */
+function handleListRooms(clientInfo) {
+    console.log(`ℹ️  客户端 ${clientInfo.persistentId || clientInfo.id} 请求房间列表。`);
+    
+    // 过滤出所有活跃的房间 (status === 'active')
+    const activeRooms = Array.from(rooms.values()).filter(room => room.status === 'active');
+
+    // 构建一个简化的房间信息列表以供发送
+    const roomListForClient = activeRooms.map(room => {
+        // 获取主播的用户名
+        const broadcasterClient = clients.get(persistentIdToClientId.get(room.broadcasterId));
+        const broadcasterName = broadcasterClient ? broadcasterClient.username : '未知主播';
+
+        return {
+            id: room.id,
+            name: room.name,
+            broadcasterName: broadcasterName,
+            viewerCount: room.viewers.size,
+            hasPassword: !!room.password // 关键：告知客户端房间是否需要密码
+        };
+    });
+
+    // 将房间列表发送给请求的客户端
+    clientInfo.ws.send(JSON.stringify({
+        type: 'room-list',
+        payload: {
+            rooms: roomListForClient
+        }
+    }));
+    
+    console.log(`📤  已向 ${clientInfo.persistentId || clientInfo.id} 发送 ${roomListForClient.length} 个活跃房间的信息。`);
+}
+
     /**
  * 处理列出房间消息
  * @param {object} clientInfo - 客户端信息
