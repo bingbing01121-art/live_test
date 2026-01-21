@@ -1,3 +1,9 @@
+/**
+ * live_test/server.js
+ * 
+ * 这是一个基于 WebSocket 的信令服务器，用于支持 WebRTC 实时音视频通信。
+ * 它管理客户端连接、房间创建与加入、WebRTC 信令交换，以及主播重连和房间密码保护等功能。
+ */
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const config = require('./config'); // 导入配置文件
@@ -7,6 +13,7 @@ const PORT = process.env.PORT || 8088;
 // 创建WebSocket服务器
 const wss = new WebSocket.Server({ port: PORT });
 
+// 定义主播异常断开后允许重连的宽限时间（毫秒），在此期间房间不会被立即关闭
 const RECONNECT_TIMEOUT_MS = 20000; // 20 seconds for broadcaster reconnect grace period
 
 // --- 数据结构 ---
@@ -151,8 +158,8 @@ function handleCreateRoom(clientInfo, payload) {
         mutedViewers: new Set(), // 存储被禁言观众的持久化ID
         isAnchorMuted: false, // 主播自身是否静音的状态
         status: 'active', // 房间状态：'active' / 'inactive' / 'pending_rejoin'
-        reconnectTimeout: null, // 重连超时ID
-        password: password || null // Store the password, or null if none provided
+        reconnectTimeout: null, // 重连超时ID，用于存储 setTimeout 的ID，以便清除
+        password: password || null // 存储房间密码，如果客户端未提供则为 null。支持密码保护的房间。
     };
     rooms.set(roomId, newRoom); // 将新房间添加到房间列表中
     persistentIdToRoomId.set(broadcasterId, roomId); // 记录主播所在的房间
@@ -195,17 +202,17 @@ function handleCreateRoom(clientInfo, payload) {
             console.log(`ℹ️  房间 ${roomId} 的名称已更新为 "${roomName}"。`);
         }
         // Update password if provided, or clear if empty
-        room.password = password || null; // Update the password
+        room.password = password || null; // 主播重连时，更新或清除房间密码
         console.log(`ℹ️  房间 ${roomId} 的密码已更新。`);
         
-            // 假设房间在断开时被标记为非活跃，这里可以重新激活
-            if (room.reconnectTimeout) {
-                clearTimeout(room.reconnectTimeout);
-                room.reconnectTimeout = null;
-            }
-            room.status = 'active'; // 主播重连成功，房间重新激活
-        
-            console.log(`✅ 主播 ${persistentId} 成功重连房间 "${room.name}" (ID: ${roomId})。`);        // 向主播发送重连成功的消息
+        // 如果主播在宽限期内重连成功，则清除房间的自动关闭计时器，并重新激活房间
+        if (room.reconnectTimeout) {
+            clearTimeout(room.reconnectTimeout);
+            room.reconnectTimeout = null;
+        }
+        room.status = 'active'; // 主播重连成功，房间状态重新激活为 'active'
+    
+        console.log(`✅ 主播 ${persistentId} 成功重连房间 "${room.name}" (ID: ${roomId})。`);        // 向主播发送重连成功的消息
         clientInfo.ws.send(JSON.stringify({ type: 'room-rejoined', payload: { roomId: room.id, roomName: room.name } }));
     
         // 通知所有观众主播已重新连接（如果他们在线且还在该房间）
@@ -228,7 +235,7 @@ function handleListRooms(clientInfo) {
         // 获取主播的用户名
         broadcasterName: clients.get(persistentIdToClientId.get(room.broadcasterId))?.username,
         viewerCount: room.viewers.size, // 房间内的观众数量
-        isPasswordProtected: room.password !== null // Indicate if password protected
+        isPasswordProtected: room.password !== null // 指示房间是否受密码保护，用于观众端UI显示
     }));
     // 向客户端发送房间列表
     clientInfo.ws.send(JSON.stringify({ type: 'room-list', payload: roomList }));
@@ -240,14 +247,12 @@ function handleListRooms(clientInfo) {
  * @param {object} payload - 消息负载，包含房间ID
  */
 function handleJoinRoom(clientInfo, payload) {
-    const { roomId, password } = payload; // Added password to payload destructuring
-    const room = rooms.get(roomId);
+    // 检查房间是否存在
     if (!room) {
-        // 如果房间不存在，发送错误消息
         return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '房间未找到' } }));
     }
 
-    // Check for password
+    // 检查房间是否受密码保护，并验证提供的密码
     if (room.password !== null && room.password !== password) {
         console.warn(`⚠️  观众 ${clientInfo.persistentId} 尝试加入密码保护房间 ${roomId}，但密码错误。`);
         return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '密码错误', code: 'PASSWORD_INCORRECT' } }));
@@ -337,12 +342,16 @@ function handleDisconnect(clientId) {
     // 如果是主播断开连接
     if (role === 'broadcaster' && roomId) {
         const room = rooms.get(roomId);
-        if (!room) return; // Should not happen if roomId is valid
+        if (!room) { // 理论上不会发生，因为 roomId 应该有效
+            console.warn(`⚠️  主播 ${persistentId} 断开连接，但房间 ${roomId} 不存在。`);
+            return;
+        }
 
+        // 将房间状态设为“待重连”，并通知观众主播暂时断开
         room.status = 'pending_rejoin';
-        console.log(`📣 房间 ${roomId} 的主播断开连接。房间进入待重连状态。`);
+        console.log(`📣 房间 ${roomId} 的主播 ${persistentId} 断开连接。房间进入待重连状态。`);
 
-        // 通知所有观众主播暂时断开连接 (而不是房间关闭)
+        // 通知所有观众主播暂时断开连接 (而不是房间关闭)，以便客户端可以显示“主播已离开”或尝试重新协商
         room.viewers.forEach(viewerId => {
             const viewerClient = clients.get(persistentIdToClientId.get(viewerId));
             if (viewerClient) {
@@ -350,10 +359,10 @@ function handleDisconnect(clientId) {
             }
         });
 
-        // 设置一个超时，如果主播在此时间内未能重连，则关闭房间
+        // 设置一个超时计时器，如果在宽限期内主播未能重连，则自动关闭房间
         room.reconnectTimeout = setTimeout(() => {
             console.log(`❌ 房间 ${roomId} 的主播重连超时，正在关闭房间。`);
-            // 通知所有观众房间已关闭
+            // 通知所有观众房间已关闭，并执行清理
             room.viewers.forEach(viewerId => {
                 const viewerClient = clients.get(persistentIdToClientId.get(viewerId));
                 if (viewerClient) {
@@ -365,7 +374,7 @@ function handleDisconnect(clientId) {
             console.log(`🗑️  房间 ${roomId} 已被删除。`);
         }, RECONNECT_TIMEOUT_MS);
     } 
-    // 如果是观众断开连接
+    // 如果是观众断开连接，则从房间中移除观众
     else if (role === 'viewer' && roomId) {
         const room = rooms.get(roomId);
         if (room) {
