@@ -331,6 +331,7 @@ function handleJoinRoom(clientInfo, payload) {
         }));
     }
 
+    console.log(`ℹ️  在 handleJoinRoom 中调用 sendViewerListUpdate (房间 ${room.id})`); // New log for debugging
     // 广播更新后的观众列表给所有客户端 (包括新加入的观众和主播)
     sendViewerListUpdate(room);
 }
@@ -426,6 +427,7 @@ function handleDisconnect(clientId) {
             }
         }
         persistentIdToRoomId.delete(persistentId); // 从映射中移除观众的房间信息
+        console.log(`ℹ️  在 handleDisconnect 中调用 sendViewerListUpdate (房间 ${room.id})`); // New log for debugging
         // 广播更新后的观众列表
         sendViewerListUpdate(room);
     }
@@ -594,6 +596,8 @@ function sendViewerListUpdate(room) {
         }
     });
 
+    console.log(`ℹ️  房间 ${room.id} 准备发送观众列表更新: ${JSON.stringify(viewersInRoom)}`); // New log for debugging
+
     const updateMessage = JSON.stringify({
         type: 'viewer-list-update',
         payload: {
@@ -645,6 +649,7 @@ function handleKickUser(broadcasterInfo, payload) {
         setTimeout(() => {
             targetClient.ws.close(); // 关闭目标观众的WebSocket连接
         }, 100);
+        console.log(`ℹ️  在 handleKickUser 中调用 sendViewerListUpdate (房间 ${room.id})`); // New log for debugging
         // 广播更新后的观众列表
         sendViewerListUpdate(room);
         // 无需调用 handleLeaveRoom，因为 'close' 事件会触发清理
