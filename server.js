@@ -98,6 +98,9 @@ wss.on('connection', ws => {
             case 'live.anchor.unmute':
                 handleAnchorMuteStatus(clientInfo, message);
                 break;
+            case 'update-room-password':
+                handleUpdateRoomPassword(clientInfo, message.payload);
+                break;
             default:
                 console.warn(`⚠️  [${logId}] 未处理的消息类型: ${message.type}`);
         }
@@ -327,6 +330,9 @@ function handleJoinRoom(clientInfo, payload) {
             payload: { anchorId: room.broadcasterId, isMuted: true }
         }));
     }
+
+    // 广播更新后的观众列表给所有客户端 (包括新加入的观众和主播)
+    sendViewerListUpdate(room);
 }
 
 /**
@@ -420,6 +426,8 @@ function handleDisconnect(clientId) {
             }
         }
         persistentIdToRoomId.delete(persistentId); // 从映射中移除观众的房间信息
+        // 广播更新后的观众列表
+        sendViewerListUpdate(room);
     }
 
     clients.delete(clientId); // 从客户端列表中移除
@@ -520,6 +528,30 @@ function handleAnchorMuteStatus(clientInfo, message) {
 }
 
 /**
+ * 处理更新房间密码消息
+ * @param {object} clientInfo - 主播的客户端信息
+ * @param {object} payload - 消息负载，包含 roomId 和 password
+ */
+function handleUpdateRoomPassword(clientInfo, payload) {
+    const { roomId, password } = payload;
+    const persistentId = clientInfo.persistentId;
+    const room = rooms.get(roomId);
+
+    // 检查房间是否存在且操作者是主播
+    if (!room || room.broadcasterId !== persistentId) {
+        console.warn(`⚠️  用户 ${persistentId} 尝试更新房间 ${roomId} 的密码，但不是主播或房间无效。`);
+        // 可选：向客户端发送错误消息
+        return clientInfo.ws.send(JSON.stringify({ type: 'error', payload: { message: '无权操作或房间无效', code: 'UNAUTHORIZED_OR_ROOM_INVALID' } }));
+    }
+
+    room.password = password && password.length > 0 ? password : null; // 更新房间密码，空字符串表示清除密码
+    console.log(`🔑 房间 ${roomId} 的密码已由主播 ${persistentId} 更新为: ${room.password ? '[已设置]' : '[无密码]'}`);
+
+    // 可选：向主播发送确认消息
+    clientInfo.ws.send(JSON.stringify({ type: 'room-password-updated', payload: { roomId, hasPassword: !!room.password } }));
+}
+
+/**
  * 路由P2P消息 (WebRTC 信令消息)
  * @param {string} senderId - 消息发送者的持久化ID
  * @param {object} message - 消息对象，包含类型和负载
@@ -538,6 +570,50 @@ function routeP2PMessage(senderId, message) {
     } else {
         console.warn(`⚠️  找不到目标客户端，持久化ID为: ${targetId}`);
     }
+}
+
+/**
+ * 将房间内所有观众（包括主播，如果在线）的列表广播给所有观众。
+ * @param {object} room - 房间对象
+ */
+function sendViewerListUpdate(room) {
+    if (!room) return;
+
+    const viewersInRoom = [];
+    // 添加主播到观众列表（如果主播在线）
+    const broadcasterClient = clients.get(persistentIdToClientId.get(room.broadcasterId));
+    if (broadcasterClient && broadcasterClient.ws.readyState === WebSocket.OPEN) {
+        viewersInRoom.push({ id: broadcasterClient.persistentId, username: broadcasterClient.username, role: 'broadcaster' });
+    }
+
+    // 添加所有观众到列表
+    room.viewers.forEach(viewerPersistentId => {
+        const viewerClient = clients.get(persistentIdToClientId.get(viewerPersistentId));
+        if (viewerClient && viewerClient.ws.readyState === WebSocket.OPEN) {
+            viewersInRoom.push({ id: viewerClient.persistentId, username: viewerClient.username, role: 'viewer' });
+        }
+    });
+
+    const updateMessage = JSON.stringify({
+        type: 'viewer-list-update',
+        payload: {
+            viewers: viewersInRoom
+        }
+    });
+
+    // 广播给房间内的所有客户端 (包括主播和观众)
+    // 遍历所有在房间内的客户端，发送更新
+    if (broadcasterClient && broadcasterClient.ws.readyState === WebSocket.OPEN) {
+        broadcasterClient.ws.send(updateMessage);
+    }
+    room.viewers.forEach(viewerPersistentId => {
+        const viewerClient = clients.get(persistentIdToClientId.get(viewerPersistentId));
+        if (viewerClient && viewerClient.ws.readyState === WebSocket.OPEN) {
+            viewerClient.ws.send(updateMessage);
+        }
+    });
+
+    console.log(`📡 房间 ${room.id} 的观众列表已更新并广播给 ${viewersInRoom.length} 个客户端。`);
 }
 
 /**
@@ -569,6 +645,8 @@ function handleKickUser(broadcasterInfo, payload) {
         setTimeout(() => {
             targetClient.ws.close(); // 关闭目标观众的WebSocket连接
         }, 100);
+        // 广播更新后的观众列表
+        sendViewerListUpdate(room);
         // 无需调用 handleLeaveRoom，因为 'close' 事件会触发清理
     }
 
