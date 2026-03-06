@@ -227,6 +227,9 @@ function handleCreateRoom(clientInfo, payload) {
                 viewerClient.ws.send(JSON.stringify({ type: 'broadcaster-rejoined', payload: { roomId: room.id, broadcasterId: persistentId } }));
             }
         });
+
+        // 关键新增：重连后立即广播最新的观众列表，促使主播为现有观众重建 P2P 连接
+        sendViewerListUpdate(room);
     }
 
 /**
