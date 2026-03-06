@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 8088;
 const wss = new WebSocket.Server({ port: PORT });
 
 // 定义主播异常断开后允许重连的宽限时间（毫秒），在此期间房间不会被立即关闭
-const RECONNECT_TIMEOUT_MS = 20000; // 20 seconds for broadcaster reconnect grace period
+const RECONNECT_TIMEOUT_MS = 30000; // 30 seconds for broadcaster reconnect grace period
 
 // --- 数据结构 ---
 // 存储所有连接的客户端信息，键为客户端的临时ID (clientId)，值为包含客户端ID、WebSocket连接、持久化ID和用户名的对象
@@ -236,21 +236,24 @@ function handleCreateRoom(clientInfo, payload) {
 function handleListRooms(clientInfo) {
     console.log(`ℹ️  客户端 ${clientInfo.persistentId || clientInfo.id} 请求房间列表。`);
     
-    // 过滤出所有活跃的房间 (status === 'active')
-    const activeRooms = Array.from(rooms.values()).filter(room => room.status === 'active');
+    // 过滤出所有活跃或正在等待重连的房间
+    const visibleRooms = Array.from(rooms.values()).filter(room => 
+        room.status === 'active' || room.status === 'pending_rejoin'
+    );
 
     // 构建一个简化的房间信息列表以供发送
-    const roomListForClient = activeRooms.map(room => {
+    const roomListForClient = visibleRooms.map(room => {
         // 获取主播的用户名
         const broadcasterClient = clients.get(persistentIdToClientId.get(room.broadcasterId));
-        const broadcasterName = broadcasterClient ? broadcasterClient.username : '未知主播';
+        const broadcasterName = broadcasterClient ? broadcasterClient.username : '主播已离线(待重连)';
 
         return {
             id: room.id,
             name: room.name,
             broadcasterName: broadcasterName,
             viewerCount: room.viewers.size,
-            isPasswordProtected: !!room.password // 关键：告知客户端房间是否需要密码
+            isPasswordProtected: !!room.password,
+            isReconnecting: room.status === 'pending_rejoin' // 新增：标识主播是否掉线重连中
         };
     });
 
